@@ -1,0 +1,10 @@
+{
+  "id": "prod_123",
+  "title": "Moon Bunny Plush",
+  "description": "…",
+  "price": { "amount": 4500, "currency": "USD", "display": "$45.00" },
+  "inventoryQty": 3,
+  "images": [{ "path": "products/prod_123/1.jpg", "alt": "Front view" }],
+  "createdAt": "2026-02-05T21:15:00Z",
+  "updatedAt": "2026-02-05T21:15:00Z"
+}
