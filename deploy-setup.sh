@@ -1,7 +1,7 @@
 export PROJECT_ID="soggy-stitches"
 export DB_USER="postgres"
 export DB_NAME="postgres"
-export DB_PASS="woofinsTheSoggy21!"
+export DB_PASS=""
 export INSTANCE_CONNECTION_NAME="soggy-stitches:us-east1:soggy-db"
 export FUNCTION_NAME="products"
 export REGION="us-east1"
