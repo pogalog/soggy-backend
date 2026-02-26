@@ -1,6 +1,7 @@
 "use strict";
 
 const { randomUUID } = require("node:crypto");
+const { env } = require("../config/env");
 
 const {
   createCart,
@@ -8,6 +9,7 @@ const {
   updateCart,
   deleteCart
 } = require("../models/cartModel");
+const { getProductInventoryByIds } = require("../models/productModel");
 
 function parseJsonBody(req) {
   if (req.body === undefined || req.body === null || req.body === "") {
@@ -140,6 +142,56 @@ function normalizeCartItems(items, { allowEmpty }) {
   });
 }
 
+async function validateCartItemQuantities(pool, items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return;
+  }
+
+  const productIds = items.map((item) => item.productId);
+  const inventoryByProductId = await getProductInventoryByIds(pool, productIds);
+  const violations = [];
+
+  for (const item of items) {
+    const inventoryQty = inventoryByProductId.get(item.productId);
+
+    if (inventoryQty === undefined) {
+      violations.push({
+        productId: item.productId,
+        requestedQuantity: item.quantity,
+        reason: "PRODUCT_NOT_FOUND"
+      });
+      continue;
+    }
+
+    if (item.quantity > env.maxCartQty) {
+      violations.push({
+        productId: item.productId,
+        requestedQuantity: item.quantity,
+        maxCartQty: env.maxCartQty,
+        reason: "EXCEEDS_MAX_CART_QTY"
+      });
+    }
+
+    if (item.quantity > inventoryQty) {
+      violations.push({
+        productId: item.productId,
+        requestedQuantity: item.quantity,
+        inventoryQty,
+        reason: "EXCEEDS_INVENTORY"
+      });
+    }
+  }
+
+  if (violations.length > 0) {
+    const error = withStatusError(
+      "One or more cart item quantities exceed allowed limits",
+      422
+    );
+    error.details = violations;
+    throw error;
+  }
+}
+
 function methodNotAllowed(res) {
   res.set("Allow", "GET, POST, PUT, DELETE");
   return res.status(405).json({ error: "Method not allowed" });
@@ -168,6 +220,7 @@ function createCartHandler({ getPool }) {
         sessionId = extractSessionId(req, body) || generateSessionId();
         const items = normalizeCartItems(body.items, { allowEmpty: false });
         const pool = getPool();
+        await validateCartItemQuantities(pool, items);
         const cart = await createCart(pool, { sessionId, items });
         return res.status(201).json(cart);
       }
@@ -176,6 +229,7 @@ function createCartHandler({ getPool }) {
         sessionId = requireSessionId(req, body);
         const items = normalizeCartItems(body.items, { allowEmpty: true });
         const pool = getPool();
+        await validateCartItemQuantities(pool, items);
         const cart = await updateCart(pool, { sessionId, items });
         return res.status(200).json(cart);
       }
@@ -219,7 +273,12 @@ function createCartHandler({ getPool }) {
       }
 
       const publicMessage = statusCode === 500 ? "Internal server error" : error.message;
-      return res.status(statusCode).json({ error: publicMessage });
+      const responseBody = { error: publicMessage };
+      if (statusCode < 500 && error.details !== undefined) {
+        responseBody.details = error.details;
+      }
+
+      return res.status(statusCode).json(responseBody);
     }
   };
 }

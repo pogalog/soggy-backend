@@ -14,6 +14,11 @@ function readInt(value, fallback) {
   return Number.isNaN(parsed) ? fallback : parsed;
 }
 
+function readPositiveInt(value, fallback) {
+  const parsed = readInt(value, fallback);
+  return parsed > 0 ? parsed : fallback;
+}
+
 const env = {
   dbUser: process.env.DB_USER,
   dbPassword: process.env.DB_PASS,
@@ -26,7 +31,8 @@ const env = {
   dbPoolMax: readInt(process.env.DB_POOL_MAX, 5),
   dbIdleTimeoutMs: readInt(process.env.DB_IDLE_TIMEOUT_MS, 30000),
   dbConnectionTimeoutMs: readInt(process.env.DB_CONNECTION_TIMEOUT_MS, 10000),
-  priceCurrency: process.env.PRICE_CURRENCY || "USD"
+  priceCurrency: process.env.PRICE_CURRENCY || "USD",
+  maxCartQty: readPositiveInt(process.env.MAX_CART_QTY, 5)
 };
 
 module.exports = {
