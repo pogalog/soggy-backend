@@ -28,6 +28,14 @@ const PRODUCT_BY_ID_SQL = `
   GROUP BY p.id
 `;
 
+const PRODUCT_INVENTORY_BY_IDS_SQL = `
+  SELECT
+    id,
+    inventory_qty
+  FROM products
+  WHERE id = ANY($1::text[])
+`;
+
 function formatMoney(cents, currency) {
   const amount = Number(cents || 0);
   const formatter = new Intl.NumberFormat("en-US", {
@@ -63,6 +71,18 @@ async function getProductById(pool, productId) {
   return mapProductRow(result.rows[0]);
 }
 
+async function getProductInventoryByIds(pool, productIds) {
+  if (!Array.isArray(productIds) || productIds.length === 0) {
+    return new Map();
+  }
+
+  const result = await pool.query(PRODUCT_INVENTORY_BY_IDS_SQL, [productIds]);
+  return new Map(
+    result.rows.map((row) => [row.id, Number(row.inventory_qty)])
+  );
+}
+
 module.exports = {
-  getProductById
+  getProductById,
+  getProductInventoryByIds
 };
