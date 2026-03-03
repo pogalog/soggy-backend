@@ -1,0 +1,8 @@
+{
+  "received": true,
+  "eventType": "checkout.session.completed",
+  "orderProcessed": {
+    "orderId": "4fd1813c-a830-4f24-9f2d-398b5d6359e8",
+    "alreadyPaid": false
+  }
+}

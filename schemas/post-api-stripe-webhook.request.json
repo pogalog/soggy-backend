@@ -1,0 +1,21 @@
+{
+  "id": "evt_1ABCxyz",
+  "object": "event",
+  "type": "checkout.session.completed",
+  "data": {
+    "object": {
+      "id": "cs_test_123",
+      "object": "checkout.session",
+      "metadata": {
+        "order_id": "4fd1813c-a830-4f24-9f2d-398b5d6359e8"
+      },
+      "payment_intent": "pi_123",
+      "currency": "usd",
+      "amount_subtotal": 4500,
+      "amount_total": 4860,
+      "total_details": {
+        "amount_tax": 360
+      }
+    }
+  }
+}
