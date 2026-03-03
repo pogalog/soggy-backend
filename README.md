@@ -7,6 +7,7 @@ Node.js HTTP Cloud Functions for product retrieval and shopping cart CRUD backed
 Run/deploy one HTTP function and route by path:
 
 - Product: `GET /products/:id`
+- Markets: `GET /markets`
 - Cart:
   - `POST /cart` (server generates `sessionId`; `/cart/:sessionId` also accepted)
   - `GET|PUT|DELETE /cart/:sessionId`
@@ -22,6 +23,13 @@ Legacy exports `getProduct` and `cartService` still exist, but both now point to
 - `GET /?id=:id` (fallback format for direct function URLs)
 
 Success response shape matches `contract/get-products-id-response.json`.
+
+## Markets endpoint
+
+- `GET /markets`
+- `GET /api/markets`
+
+Returns all rows from the `markets` table ordered by `start_time` ascending.
 
 ## Cart endpoints
 
@@ -93,9 +101,11 @@ This endpoint verifies `Stripe-Signature` using the raw request body (`req.rawBo
 ## Files
 
 - `index.js`: Cloud Function export(s), including routed `api`
-- `src/handlers/apiHandler.js`: path-based router for product/cart endpoints
+- `src/handlers/apiHandler.js`: path-based router for product/cart/market endpoints
 - `src/handlers/getProductHandler.js`: HTTP request handling
 - `src/models/productModel.js`: SQL query + schema-to-contract mapping
+- `src/handlers/marketHandler.js`: market list HTTP handling
+- `src/models/marketModel.js`: market list SQL query + response mapping
 - `src/handlers/cartHandler.js`: cart CRUD HTTP handling
 - `src/models/cartModel.js`: cart CRUD SQL operations
 - `src/handlers/commissionFormHandler.js`: commission form intake + email delivery
