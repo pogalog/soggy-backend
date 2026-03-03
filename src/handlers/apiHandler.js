@@ -68,12 +68,23 @@ function isCommissionFormRequest(req) {
   );
 }
 
+function isMarketRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/markets" ||
+    path === "/markets/" ||
+    path === "/api/markets" ||
+    path === "/api/markets/"
+  );
+}
+
 function createApiHandler({
   productHandler,
   cartHandler,
   checkoutHandler,
   stripeWebhookHandler,
-  commissionFormHandler
+  commissionFormHandler,
+  marketHandler
 }) {
   return async function api(req, res) {
     try {
@@ -89,6 +100,10 @@ function createApiHandler({
         return checkoutHandler(req, res);
       }
 
+      if (marketHandler && isMarketRequest(req)) {
+        return marketHandler(req, res);
+      }
+
       if (isCartRequest(req)) {
         return cartHandler(req, res);
       }
@@ -99,7 +114,7 @@ function createApiHandler({
 
       return res.status(404).json({
         error:
-          "Route not found. Use /products/:id, /cart/:sessionId, /commissions, /api/checkout/session, or /api/stripe/webhook"
+          "Route not found. Use /products/:id, /markets, /cart/:sessionId, /commissions, /api/checkout/session, or /api/stripe/webhook"
       });
     } catch (error) {
       console.error("Unhandled API routing error", {
