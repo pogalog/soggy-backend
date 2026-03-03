@@ -1,0 +1,17 @@
+{
+  "submissionKey": "d5d30497-1d65-4f93-b7af-7674d9ef7cb7",
+  "form": {
+    "customerName": "Anaiah Carter",
+    "customerEmail": "anaiah@example.com",
+    "contactPhone": "+1 (555) 123-4567",
+    "itemName": "Pastel dragon plush",
+    "itemDescription": "A medium-sized crochet dragon in mint green with cream accents, floppy wings, and a curled tail.",
+    "yarnType": "chinille",
+    "yarnColor": "#7ed6c2",
+    "attachmentMaterialType": "yarn-only"
+  },
+  "storage": {
+    "uploadDirectory": "2026/03/02/pastel-dragon-plush",
+    "images": []
+  }
+}

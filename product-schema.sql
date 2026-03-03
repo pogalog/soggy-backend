@@ -5,6 +5,7 @@ create table if not exists products (
   description   text,
   sell_price_cents   integer not null,
   inventory_qty integer not null default 0,
+  stripe_thumb_url text,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );

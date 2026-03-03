@@ -36,6 +36,17 @@ const PRODUCT_INVENTORY_BY_IDS_SQL = `
   WHERE id = ANY($1::text[])
 `;
 
+const PRODUCTS_FOR_CHECKOUT_BY_IDS_SQL = `
+  SELECT
+    id,
+    title,
+    sell_price_cents,
+    inventory_qty,
+    stripe_thumb_url
+  FROM products
+  WHERE id = ANY($1::text[])
+`;
+
 function formatMoney(cents, currency) {
   const amount = Number(cents || 0);
   const formatter = new Intl.NumberFormat("en-US", {
@@ -82,7 +93,31 @@ async function getProductInventoryByIds(pool, productIds) {
   );
 }
 
+async function getProductsForCheckoutByIds(pool, productIds) {
+  if (!Array.isArray(productIds) || productIds.length === 0) {
+    return new Map();
+  }
+
+  const result = await pool.query(PRODUCTS_FOR_CHECKOUT_BY_IDS_SQL, [productIds]);
+  return new Map(
+    result.rows.map((row) => [
+      row.id,
+      {
+        id: row.id,
+        title: row.title,
+        sellPriceCents: Number(row.sell_price_cents),
+        inventoryQty: Number(row.inventory_qty),
+        stripeThumbUrl:
+          typeof row.stripe_thumb_url === "string" && row.stripe_thumb_url.trim()
+            ? row.stripe_thumb_url.trim()
+            : null
+      }
+    ])
+  );
+}
+
 module.exports = {
   getProductById,
-  getProductInventoryByIds
+  getProductInventoryByIds,
+  getProductsForCheckoutByIds
 };

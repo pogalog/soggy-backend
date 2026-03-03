@@ -19,8 +19,7 @@ function isCartRequest(req) {
     return true;
   }
 
-  // Only cart uses non-GET methods in this service.
-  return req.method !== "GET";
+  return false;
 }
 
 function isProductRequest(req) {
@@ -35,9 +34,61 @@ function isProductRequest(req) {
   return Boolean(req.query && typeof req.query.id === "string" && req.query.id.trim());
 }
 
-function createApiHandler({ productHandler, cartHandler }) {
+function isCheckoutSessionRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/checkout/session" ||
+    path === "/checkout/session/" ||
+    path === "/api/checkout/session" ||
+    path === "/api/checkout/session/"
+  );
+}
+
+function isStripeWebhookRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/stripe/webhook" ||
+    path === "/stripe/webhook/" ||
+    path === "/api/stripe/webhook" ||
+    path === "/api/stripe/webhook/"
+  );
+}
+
+function isCommissionFormRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/commissions" ||
+    path === "/commissions/" ||
+    path === "/api/commissions" ||
+    path === "/api/commissions/" ||
+    path === "/commission/form" ||
+    path === "/commission/form/" ||
+    path === "/api/commission/form" ||
+    path === "/api/commission/form/"
+  );
+}
+
+function createApiHandler({
+  productHandler,
+  cartHandler,
+  checkoutHandler,
+  stripeWebhookHandler,
+  commissionFormHandler
+}) {
   return async function api(req, res) {
     try {
+      if (stripeWebhookHandler && isStripeWebhookRequest(req)) {
+        return stripeWebhookHandler(req, res);
+      }
+
+      if (commissionFormHandler && isCommissionFormRequest(req)) {
+        return commissionFormHandler(req, res);
+      }
+
+      if (checkoutHandler && isCheckoutSessionRequest(req)) {
+        return checkoutHandler(req, res);
+      }
+
       if (isCartRequest(req)) {
         return cartHandler(req, res);
       }
@@ -47,7 +98,8 @@ function createApiHandler({ productHandler, cartHandler }) {
       }
 
       return res.status(404).json({
-        error: "Route not found. Use /products/:id or /cart/:sessionId"
+        error:
+          "Route not found. Use /products/:id, /cart/:sessionId, /commissions, /api/checkout/session, or /api/stripe/webhook"
       });
     } catch (error) {
       console.error("Unhandled API routing error", {
