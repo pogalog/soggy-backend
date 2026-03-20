@@ -7,6 +7,11 @@ create table if not exists commissions (
   yarn_type                  text not null,
   yarn_color                 text not null,
   attachment_material_type   text not null,
+  requires_commit            boolean not null default false,
+  commitment_deposit_amount  integer,
+  time_cost                  integer,
+  ship_date                  date,
+  total_cost                 integer,
   storage_bucket             text not null,
   upload_directory           text,
   storage_images             jsonb not null default '[]'::jsonb,
@@ -17,6 +22,21 @@ create table if not exists commissions (
   created_at                 timestamptz not null default now(),
   updated_at                 timestamptz not null default now()
 );
+
+alter table if exists commissions
+  add column if not exists requires_commit boolean not null default false;
+
+alter table if exists commissions
+  add column if not exists commitment_deposit_amount integer;
+
+alter table if exists commissions
+  add column if not exists time_cost integer;
+
+alter table if exists commissions
+  add column if not exists ship_date date;
+
+alter table if exists commissions
+  add column if not exists total_cost integer;
 
 alter table if exists commissions
   alter column upload_directory drop not null;

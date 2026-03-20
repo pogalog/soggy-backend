@@ -16,6 +16,10 @@ function normalizeOptionalInt(value) {
   return Math.trunc(value);
 }
 
+function isCommissionOrderItem(productId) {
+  return typeof productId === "string" && /^cm_[0-9a-f]+$/i.test(productId);
+}
+
 function buildInsertOrderItemsQuery(orderId, items) {
   const values = [];
   const placeholders = items.map((item, index) => {
@@ -66,8 +70,8 @@ async function createPendingOrder(pool, { cartSessionId, channel, currency, item
   try {
     await client.query("BEGIN");
 
-    // Pattern A: persist the order snapshot first so Postgres remains the source of truth.
-    // Inventory reservation is intentionally omitted here; the paid webhook decrements inventory atomically.
+    // Persist the order snapshot first so Postgres remains the source of truth.
+    // Products are made on demand, so no inventory reservation happens here.
     await client.query(
       `
         INSERT INTO orders (
@@ -189,24 +193,11 @@ async function markOrderPaidAndDecrementInventory(
       throw withStatusError("Order has no items", 409);
     }
 
-    for (const item of itemsResult.rows) {
-      const decResult = await client.query(
-        `
-          UPDATE products
-          SET
-            inventory_qty = inventory_qty - $1,
-            updated_at = NOW()
-          WHERE id = $2
-            AND inventory_qty >= $1
-        `,
-        [Number(item.quantity), item.product_id]
-      );
+    const committedCommissionIds = [];
 
-      if (decResult.rowCount === 0) {
-        throw withStatusError(
-          `Insufficient inventory while finalizing order for product ${item.product_id}`,
-          409
-        );
+    for (const item of itemsResult.rows) {
+      if (isCommissionOrderItem(item.product_id)) {
+        committedCommissionIds.push(item.product_id);
       }
     }
 
@@ -235,10 +226,22 @@ async function markOrderPaidAndDecrementInventory(
       ]
     );
 
+    for (const commissionId of committedCommissionIds) {
+      await client.query(
+        `
+          UPDATE commissions
+          SET status = 'customer_committed', updated_at = NOW()
+          WHERE id = $1
+        `,
+        [commissionId]
+      );
+    }
+
     await client.query("COMMIT");
     return {
       orderId,
-      alreadyPaid: false
+      alreadyPaid: false,
+      committedCommissionIds
     };
   } catch (error) {
     await client.query("ROLLBACK");

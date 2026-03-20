@@ -8,14 +8,14 @@ BEGIN;
 -- TRUNCATE TABLE product_images;
 -- TRUNCATE TABLE products;
 
-INSERT INTO products (id, title, description, sell_price_cents, inventory_qty, created_at, updated_at)
+INSERT INTO products (id, title, description, sell_price_cents, days_to_create, created_at, updated_at)
 VALUES
   (
     'prod_moon_bunny',
     'Moon Bunny Plush',
     'Soft plush bunny with embroidered moon details. Great gift size; can be customized in color.',
     4500,
-    3,
+    1.5,
     NOW() - INTERVAL '20 days',
     NOW() - INTERVAL '2 days'
   ),
@@ -24,7 +24,7 @@ VALUES
     'Forest Frog Buddy',
     'A squishy frog friend with a little smile. Works up nicely in greens, teals, or any “mossy” palette.',
     3800,
-    5,
+    1,
     NOW() - INTERVAL '18 days',
     NOW() - INTERVAL '1 day'
   ),
@@ -33,7 +33,7 @@ VALUES
     'Sunflower Keychain',
     'Tiny sunflower charm with sturdy clasp. Perfect for bags, keys, or zipper pulls.',
     1200,
-    12,
+    0.25,
     NOW() - INTERVAL '16 days',
     NOW() - INTERVAL '3 days'
   ),
@@ -42,7 +42,7 @@ VALUES
     'Winter Scarf',
     'Cozy scarf with clean ribbing and a soft drape. Made to order in your preferred colors.',
     6000,
-    0,
+    2.5,
     NOW() - INTERVAL '30 days',
     NOW() - INTERVAL '10 days'
   ),
@@ -51,7 +51,7 @@ VALUES
     'Starry Night Beanie',
     'Warm beanie with subtle star motif. Stretchy fit and comfy brim.',
     3200,
-    7,
+    1,
     NOW() - INTERVAL '12 days',
     NOW() - INTERVAL '1 day'
   ),
@@ -60,7 +60,7 @@ VALUES
     'Cable Knit Headband',
     'Twist-front headband that keeps ears warm without hat hair. Soft, snug, and cute.',
     1800,
-    9,
+    0.5,
     NOW() - INTERVAL '11 days',
     NOW() - INTERVAL '4 days'
   ),
@@ -69,7 +69,7 @@ VALUES
     'Cloud Coaster Set (4)',
     'Set of four cloud coasters. Thick, absorbent, and makes your mug look adorable.',
     2400,
-    4,
+    0.75,
     NOW() - INTERVAL '14 days',
     NOW() - INTERVAL '6 days'
   ),
@@ -78,7 +78,7 @@ VALUES
     'Mushroom Pouch',
     'Little drawstring pouch with mushroom applique. Great for dice, earbuds, or tiny treasures.',
     2600,
-    2,
+    0.5,
     NOW() - INTERVAL '9 days',
     NOW() - INTERVAL '2 days'
   ),
@@ -87,7 +87,7 @@ VALUES
     'Dragon Egg Plush',
     'Textured “egg” plush with scale-like stitch pattern. Fun display piece; can do themed colors.',
     5200,
-    1,
+    2,
     NOW() - INTERVAL '25 days',
     NOW() - INTERVAL '5 days'
   ),
@@ -96,7 +96,7 @@ VALUES
     'Berry Bucket Hat',
     'Bucket hat with berry stitch accents. Lightweight, cute, and perfect for sunny market days.',
     7000,
-    2,
+    1.25,
     NOW() - INTERVAL '7 days',
     NOW() - INTERVAL '1 day'
   );

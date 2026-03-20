@@ -34,6 +34,16 @@ function isProductRequest(req) {
   return Boolean(req.query && typeof req.query.id === "string" && req.query.id.trim());
 }
 
+function isCommissionDetailsRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/products/commissions" ||
+    path === "/products/commissions/" ||
+    path === "/api/products/commissions" ||
+    path === "/api/products/commissions/"
+  );
+}
+
 function isCheckoutSessionRequest(req) {
   const path = normalizePath(req);
   return (
@@ -68,6 +78,34 @@ function isCommissionFormRequest(req) {
   );
 }
 
+function isCommissionLifecycleRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/commissions/commit" ||
+    path === "/commissions/commit/" ||
+    path === "/api/commissions/commit" ||
+    path === "/api/commissions/commit/" ||
+    path === "/commission/finalize" ||
+    path === "/commission/finalize/" ||
+    path === "/commissions/finalize" ||
+    path === "/commissions/finalize/" ||
+    path === "/api/commission/finalize" ||
+    path === "/api/commission/finalize/" ||
+    path === "/api/commissions/finalize" ||
+    path === "/api/commissions/finalize/"
+  );
+}
+
+function isCommissionResponseRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/commissions/respond" ||
+    path === "/commissions/respond/" ||
+    path === "/api/commissions/respond" ||
+    path === "/api/commissions/respond/"
+  );
+}
+
 function isMarketRequest(req) {
   const path = normalizePath(req);
   return (
@@ -80,9 +118,12 @@ function isMarketRequest(req) {
 
 function createApiHandler({
   productHandler,
+  commissionDetailsHandler,
   cartHandler,
   checkoutHandler,
   stripeWebhookHandler,
+  commissionResponseHandler,
+  commissionLifecycleHandler,
   commissionFormHandler,
   marketHandler
 }) {
@@ -96,12 +137,24 @@ function createApiHandler({
         return commissionFormHandler(req, res);
       }
 
+      if (commissionLifecycleHandler && isCommissionLifecycleRequest(req)) {
+        return commissionLifecycleHandler(req, res);
+      }
+
+      if (commissionResponseHandler && isCommissionResponseRequest(req)) {
+        return commissionResponseHandler(req, res);
+      }
+
       if (checkoutHandler && isCheckoutSessionRequest(req)) {
         return checkoutHandler(req, res);
       }
 
       if (marketHandler && isMarketRequest(req)) {
         return marketHandler(req, res);
+      }
+
+      if (commissionDetailsHandler && isCommissionDetailsRequest(req)) {
+        return commissionDetailsHandler(req, res);
       }
 
       if (isCartRequest(req)) {
@@ -114,7 +167,7 @@ function createApiHandler({
 
       return res.status(404).json({
         error:
-          "Route not found. Use /products/:id, /markets, /cart/:sessionId, /commissions, /api/checkout/session, or /api/stripe/webhook"
+          "Route not found. Use /products/:id, /products/commissions, /markets, /cart/:sessionId, /commissions, /commissions/respond, /commissions/commit, /commission/finalize, /api/checkout/session, or /api/stripe/webhook"
       });
     } catch (error) {
       console.error("Unhandled API routing error", {

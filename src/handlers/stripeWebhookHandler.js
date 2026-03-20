@@ -2,6 +2,13 @@
 
 const { env } = require("../config/env");
 const { getStripeClient } = require("../lib/stripeClient");
+const { sendMail } = require("../lib/mailer");
+const { fetchJsonFromGcs } = require("../lib/gcsJsonClient");
+const {
+  buildCommissionCustomerDecisionBusinessEmail,
+  buildCommissionCustomerDecisionCustomerEmail
+} = require("../lib/commissionEmailTemplates");
+const { getCommissionForFollowUp } = require("../models/commissionModel");
 const { markOrderPaidAndDecrementInventory } = require("../models/orderModel");
 
 function withStatusError(message, statusCode) {
@@ -52,6 +59,92 @@ function normalizeStripeCurrency(value) {
   return value.trim().toUpperCase();
 }
 
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function extractCustomerEmail(meta) {
+  const candidates = [
+    meta && meta.customerEmail,
+    meta && meta.customer && meta.customer.email,
+    meta && meta.form && meta.form.customerEmail,
+    meta && meta.request && meta.request.customerEmail,
+    meta && meta.request && meta.request.customer && meta.request.customer.email,
+    meta && meta.request && meta.request.form && meta.request.form.customerEmail,
+    meta && meta.payload && meta.payload.customerEmail,
+    meta && meta.payload && meta.payload.customer && meta.payload.customer.email,
+    meta && meta.payload && meta.payload.form && meta.payload.form.customerEmail
+  ];
+
+  const email = candidates.find(
+    (candidate) => typeof candidate === "string" && candidate.trim()
+  );
+
+  if (!email || !isValidEmail(email.trim())) {
+    throw withStatusError(
+      "Unable to determine customer email from commission meta.json",
+      422
+    );
+  }
+
+  return email.trim();
+}
+
+async function notifyBusinessOfCommittedCommission(pool, commissionId) {
+  const commission = await getCommissionForFollowUp(pool, commissionId);
+  if (!commission) {
+    throw withStatusError(`Commission not found for order item ${commissionId}`, 404);
+  }
+
+  let customerEmail = null;
+  try {
+    const meta = await fetchJsonFromGcs({
+      bucketName: commission.storageBucket || env.commissionGcsBucket,
+      objectPath: commission.metaPath
+    });
+    customerEmail = extractCustomerEmail(meta);
+  } catch (error) {
+    console.warn("Unable to load customer email for committed commission notice", {
+      commissionId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  const emailMessage = buildCommissionCustomerDecisionBusinessEmail({
+    commission: {
+      ...commission,
+      status: "customer_committed"
+    },
+    action: "commit",
+    customerEmail: customerEmail || "Not available"
+  });
+  const customerEmailMessage = buildCommissionCustomerDecisionCustomerEmail({
+    commission: {
+      ...commission,
+      status: "customer_committed"
+    },
+    action: "commit"
+  });
+
+  await sendMail({
+    from: env.commissionFromEmail,
+    to: env.commissionBusinessEmail,
+    replyTo: customerEmail || env.commissionFromEmail,
+    subject: emailMessage.subject,
+    html: emailMessage.html
+  });
+
+  if (customerEmail) {
+    await sendMail({
+      from: env.commissionFromEmail,
+      to: customerEmail,
+      replyTo: env.commissionFromEmail,
+      subject: customerEmailMessage.subject,
+      html: customerEmailMessage.html
+    });
+  }
+}
+
 async function handleCheckoutSessionCompleted(pool, session) {
   const metadata = session && session.metadata ? session.metadata : {};
   const orderId =
@@ -66,7 +159,7 @@ async function handleCheckoutSessionCompleted(pool, session) {
     );
   }
 
-  return markOrderPaidAndDecrementInventory(pool, {
+  const result = await markOrderPaidAndDecrementInventory(pool, {
     orderId,
     stripeCheckoutSessionId: typeof session.id === "string" ? session.id : null,
     stripePaymentIntentId:
@@ -76,6 +169,19 @@ async function handleCheckoutSessionCompleted(pool, session) {
     amountTax: Number(session.total_details && session.total_details.amount_tax),
     amountTotal: Number(session.amount_total)
   });
+
+  if (
+    result &&
+    result.alreadyPaid === false &&
+    Array.isArray(result.committedCommissionIds) &&
+    result.committedCommissionIds.length > 0
+  ) {
+    for (const commissionId of result.committedCommissionIds) {
+      await notifyBusinessOfCommittedCommission(pool, commissionId);
+    }
+  }
+
+  return result;
 }
 
 function createStripeWebhookHandler({ getPool }) {

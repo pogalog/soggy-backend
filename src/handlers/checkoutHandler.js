@@ -91,7 +91,8 @@ function normalizeCheckoutRequest(body) {
 function buildPreparedOrderItems({ cartItems, productsById }) {
   const preparedItems = [];
   const missing = [];
-  const insufficient = [];
+  const workLimitViolations = [];
+  let totalWorkDays = 0;
 
   for (const cartItem of cartItems) {
     const product = productsById.get(cartItem.productId);
@@ -100,13 +101,17 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
       continue;
     }
 
-    if (cartItem.quantity > product.inventoryQty) {
-      insufficient.push({
+    if (product.kind === "commission_commitment" && cartItem.quantity > 1) {
+      workLimitViolations.push({
         productId: cartItem.productId,
         requestedQuantity: cartItem.quantity,
-        inventoryQty: product.inventoryQty
+        maxCartQty: 1,
+        reason: "EXCEEDS_MAX_CART_QTY"
       });
-      continue;
+    }
+
+    if (product.kind !== "commission_commitment") {
+      totalWorkDays += Number(product.daysToCreate || 0) * cartItem.quantity;
     }
 
     preparedItems.push({
@@ -125,9 +130,35 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
     throw error;
   }
 
-  if (insufficient.length > 0) {
-    const error = withStatusError("Insufficient inventory for one or more cart items", 422);
-    error.details = insufficient;
+  if (totalWorkDays > env.maxCartWorkDays) {
+    for (const item of preparedItems) {
+      const product = productsById.get(item.productId);
+      if (!product || product.kind === "commission_commitment") {
+        continue;
+      }
+
+      workLimitViolations.push({
+        productId: item.productId,
+        requestedQuantity: item.quantity,
+        requestedWorkDays: Number(product.daysToCreate || 0) * item.quantity,
+        totalRequestedWorkDays: totalWorkDays,
+        maxCartWorkDays: env.maxCartWorkDays,
+        reason: "EXCEEDS_MAX_CART_WORK_DAYS"
+      });
+    }
+  }
+
+  if (workLimitViolations.length > 0) {
+    const hasWorkLimit = workLimitViolations.some(
+      (violation) => violation.reason === "EXCEEDS_MAX_CART_WORK_DAYS"
+    );
+    const error = withStatusError(
+      hasWorkLimit
+        ? "This order exceeds the current four-day production limit"
+        : "One or more cart items exceed the per-item limit",
+      422
+    );
+    error.details = workLimitViolations;
     throw error;
   }
 

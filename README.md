@@ -7,6 +7,7 @@ Node.js HTTP Cloud Functions for product retrieval and shopping cart CRUD backed
 Run/deploy one HTTP function and route by path:
 
 - Product: `GET /products/:id`
+- Commission details: `GET /products/commissions?commission_id=:id`
 - Markets: `GET /markets`
 - Cart:
   - `POST /cart` (server generates `sessionId`; `/cart/:sessionId` also accepted)
@@ -92,6 +93,46 @@ Behavior notes:
 - Sends two HTML emails over SMTP: one to the customer and one to the business inbox.
 - Storage images are rendered in the business email body as authenticated Cloud Storage links using `COMMISSION_GCS_BUCKET` + each `objectPath`.
 
+## Commission follow-up email endpoints
+
+- `POST /commissions/commit`
+- `POST /api/commissions/commit`
+- `POST /commission/finalize`
+- `POST /api/commission/finalize`
+
+Request body:
+
+```json
+{
+  "commissionId": "cm_123"
+}
+```
+
+Behavior notes:
+
+- Both endpoints look up the commission by `commissionId`.
+- Customer email is loaded from the stored `meta.json` in Cloud Storage using the commission row's `storage_bucket` + `meta_path`.
+- `POST /commissions/commit` sends the quote/commit email, includes `total_cost`, and calculates the estimated completion date from the current date plus `time_cost` days.
+- `POST /commission/finalize` sends the finished-order/final checkout email and includes `total_cost`.
+
+## Commission details endpoint
+
+- `GET /products/commissions?commission_id=:id`
+- `GET /api/products/commissions?commission_id=:id`
+
+Returns the customer-safe commission details needed to render the frontend commit-review page, including:
+
+- `item_name`
+- `item_description`
+- `yarn_type`
+- `yarn_color`
+- `attachment_material_type`
+- `status`
+- `time_cost`
+- `ship_date`
+- `total_cost`
+- `requires_commit`
+
 ## Stripe webhook endpoint
 
 - `POST /api/stripe/webhook`
@@ -103,6 +144,7 @@ This endpoint verifies `Stripe-Signature` using the raw request body (`req.rawBo
 - `index.js`: Cloud Function export(s), including routed `api`
 - `src/handlers/apiHandler.js`: path-based router for product/cart/market endpoints
 - `src/handlers/getProductHandler.js`: HTTP request handling
+- `src/handlers/getCommissionHandler.js`: customer-facing commission detail lookup
 - `src/models/productModel.js`: SQL query + schema-to-contract mapping
 - `src/handlers/marketHandler.js`: market list HTTP handling
 - `src/models/marketModel.js`: market list SQL query + response mapping
@@ -177,24 +219,37 @@ Use the included script:
 ```bash
 PROJECT_ID="your-project-id" \
 REGION="us-central1" \
-DB_USER="postgres" \
-DB_PASS="your-password" \
-DB_NAME="products_db" \
-INSTANCE_CONNECTION_NAME="your-project:your-region:your-instance" \
+DB_USER_SECRET="DB_USER" \
+DB_PASS_SECRET="DB_PASS" \
+DB_NAME_SECRET="DB_NAME" \
+INSTANCE_CONNECTION_NAME_SECRET="INSTANCE_CONNECTION_NAME" \
+SMTP_PASS_SECRET="SMTP_PASS" \
 ./deploy.sh
 ```
 
-If you use direct TCP instead of Cloud SQL sockets, set `DB_HOST` (and optional `DB_PORT`) and omit `INSTANCE_CONNECTION_NAME`.
+By default, the script assumes these Secret Manager secret names match the environment variable names and uses the `latest` version:
+
+- `DB_USER`
+- `DB_PASS`
+- `DB_NAME`
+- `INSTANCE_CONNECTION_NAME`
+- `SMTP_PASS`
+
+Override the secret names with `*_SECRET` vars if your secret names differ. You can also set `SECRET_VERSION` to use a version other than `latest`.
+
+The deployed Cloud Function service account must have `roles/secretmanager.secretAccessor` on those secrets.
+
+If you use direct TCP instead of Cloud SQL sockets, set `DB_HOST` (and optional `DB_PORT`); in that mode the deploy script will skip `INSTANCE_CONNECTION_NAME`.
 
 To deploy the unified API service, set `ENTRY_POINT=api` (recommended). Existing `getProduct` and `cartService` entry points are aliases to the same routed handler.
 
 ## Notes
 
 - Currency in the response defaults to `USD` and can be changed with `PRICE_CURRENCY`.
-- DB auth is currently password-based (`DB_PASS` required).
+- DB auth is currently password-based, but deploys now inject `DB_USER`, `DB_PASS`, `DB_NAME`, and `INSTANCE_CONNECTION_NAME` from Secret Manager.
 - Stripe Checkout requires `APP_BASE_URL`, `STRIPE_SECRET_KEY`, and `STRIPE_WEBHOOK_SECRET`.
 - `STRIPE_TAX_CODE` is optional. If set, it is sent on each Checkout line item as `price_data.product_data.tax_code`.
-- Commission email delivery requires SMTP settings (`SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`).
+- Commission email delivery requires SMTP settings (`SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`). The deploy script injects `SMTP_PASS` from Secret Manager.
 - For Gmail, you can instead set `SMTP_SERVICE=gmail` plus `SMTP_USER` and `SMTP_PASS` (Google App Password). In that mode, `SMTP_HOST` is optional.
 - `COMMISSION_FROM_EMAIL` and `COMMISSION_BUSINESS_EMAIL` default to `soggystitches@gmail.com`.
 

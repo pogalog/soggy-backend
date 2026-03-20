@@ -9,7 +9,9 @@ const {
   updateCart,
   deleteCart
 } = require("../models/cartModel");
-const { getProductInventoryByIds } = require("../models/productModel");
+const { getProductWorkByIds } = require("../models/productModel");
+
+const WORK_DAY_EPSILON = 1e-9;
 
 function parseJsonBody(req) {
   if (req.body === undefined || req.body === null || req.body === "") {
@@ -81,6 +83,52 @@ function logWarning(message, details) {
   console.warn(message, details);
 }
 
+function isCommissionProductId(productId) {
+  return typeof productId === "string" && /^cm_[0-9a-f]+$/i.test(productId);
+}
+
+function computeEstimatedProductionDays(totalWorkDays) {
+  return totalWorkDays > 0 ? Math.ceil(totalWorkDays - WORK_DAY_EPSILON) : 0;
+}
+
+function formatDateOnly(date) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function computeShipByDate(totalWorkDays) {
+  const productionDays = computeEstimatedProductionDays(totalWorkDays);
+  if (productionDays <= 0) {
+    return formatDateOnly(new Date());
+  }
+
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + productionDays);
+  return formatDateOnly(date);
+}
+
+function buildCartViolationMessage(violations) {
+  if (!Array.isArray(violations) || violations.length === 0) {
+    return "One or more cart items exceed allowed limits";
+  }
+
+  if (violations.some((violation) => violation.reason === "EXCEEDS_MAX_CART_WORK_DAYS")) {
+    return "This order exceeds the current four-day production limit";
+  }
+
+  if (violations.some((violation) => violation.reason === "EXCEEDS_MAX_CART_QTY")) {
+    return "One or more cart items exceed the per-item limit";
+  }
+
+  if (violations.some((violation) => violation.reason === "PRODUCT_NOT_FOUND")) {
+    return "One or more cart items are no longer available";
+  }
+
+  return "One or more cart items exceed allowed limits";
+}
+
 function ensureJsonContentType(req) {
   if (req.method !== "POST" && req.method !== "PUT") {
     return;
@@ -142,19 +190,28 @@ function normalizeCartItems(items, { allowEmpty }) {
   });
 }
 
-async function validateCartItemQuantities(pool, items) {
+async function inspectCartItems(pool, items) {
   if (!Array.isArray(items) || items.length === 0) {
-    return;
+    return {
+      violations: [],
+      totalWorkDays: 0,
+      estimatedProductionDays: 0,
+      shipByDate: formatDateOnly(new Date()),
+      isAtCapacity: false,
+      remainingWorkDays: env.maxCartWorkDays,
+      maxCartWorkDays: env.maxCartWorkDays
+    };
   }
 
   const productIds = items.map((item) => item.productId);
-  const inventoryByProductId = await getProductInventoryByIds(pool, productIds);
+  const workByProductId = await getProductWorkByIds(pool, productIds);
   const violations = [];
+  let totalWorkDays = 0;
 
   for (const item of items) {
-    const inventoryQty = inventoryByProductId.get(item.productId);
+    const daysToCreate = workByProductId.get(item.productId);
 
-    if (inventoryQty === undefined) {
+    if (daysToCreate === undefined) {
       violations.push({
         productId: item.productId,
         requestedQuantity: item.quantity,
@@ -163,33 +220,84 @@ async function validateCartItemQuantities(pool, items) {
       continue;
     }
 
-    if (item.quantity > env.maxCartQty) {
+    if (isCommissionProductId(item.productId) && item.quantity > 1) {
       violations.push({
         productId: item.productId,
         requestedQuantity: item.quantity,
-        maxCartQty: env.maxCartQty,
+        maxCartQty: 1,
         reason: "EXCEEDS_MAX_CART_QTY"
       });
     }
 
-    if (item.quantity > inventoryQty) {
+    if (!isCommissionProductId(item.productId)) {
+      totalWorkDays += Number(daysToCreate) * item.quantity;
+    }
+  }
+
+  if (totalWorkDays > env.maxCartWorkDays + WORK_DAY_EPSILON) {
+    for (const item of items) {
+      if (isCommissionProductId(item.productId)) {
+        continue;
+      }
+
       violations.push({
         productId: item.productId,
         requestedQuantity: item.quantity,
-        inventoryQty,
-        reason: "EXCEEDS_INVENTORY"
+        requestedWorkDays: Number(workByProductId.get(item.productId) || 0) * item.quantity,
+        totalRequestedWorkDays: totalWorkDays,
+        maxCartWorkDays: env.maxCartWorkDays,
+        reason: "EXCEEDS_MAX_CART_WORK_DAYS"
       });
     }
   }
 
-  if (violations.length > 0) {
-    const error = withStatusError(
-      "One or more cart item quantities exceed allowed limits",
-      422
-    );
-    error.details = violations;
+  const estimatedProductionDays = computeEstimatedProductionDays(totalWorkDays);
+  return {
+    violations,
+    totalWorkDays,
+    estimatedProductionDays,
+    shipByDate: computeShipByDate(totalWorkDays),
+    isAtCapacity: totalWorkDays >= env.maxCartWorkDays - WORK_DAY_EPSILON,
+    remainingWorkDays: Math.max(0, env.maxCartWorkDays - totalWorkDays),
+    maxCartWorkDays: env.maxCartWorkDays
+  };
+}
+
+async function validateCartItemQuantities(pool, items) {
+  const inspection = await inspectCartItems(pool, items);
+
+  if (inspection.violations.length > 0) {
+    const error = withStatusError(buildCartViolationMessage(inspection.violations), 422);
+    error.details = inspection.violations;
     throw error;
   }
+
+  return inspection;
+}
+
+async function buildCartSummary(pool, items) {
+  const inspection = await inspectCartItems(pool, items);
+  return {
+    totalWorkDays: inspection.totalWorkDays,
+    estimatedProductionDays: inspection.estimatedProductionDays,
+    shipByDate: inspection.shipByDate,
+    isAtCapacity: inspection.isAtCapacity,
+    remainingWorkDays: inspection.remainingWorkDays,
+    maxCartWorkDays: inspection.maxCartWorkDays
+  };
+}
+
+async function attachSummary(pool, cart) {
+  if (!cart || typeof cart !== "object") {
+    return cart;
+  }
+
+  const items = Array.isArray(cart.items) ? cart.items : [];
+  const summary = await buildCartSummary(pool, items);
+  return {
+    ...cart,
+    summary
+  };
 }
 
 function methodNotAllowed(res) {
@@ -213,7 +321,7 @@ function createCartHandler({ getPool }) {
         sessionId = requireSessionId(req, body);
         const pool = getPool();
         const cart = await getCartBySessionId(pool, sessionId);
-        return res.status(200).json(cart);
+        return res.status(200).json(await attachSummary(pool, cart));
       }
 
       if (req.method === "POST") {
@@ -222,7 +330,7 @@ function createCartHandler({ getPool }) {
         const pool = getPool();
         await validateCartItemQuantities(pool, items);
         const cart = await createCart(pool, { sessionId, items });
-        return res.status(201).json(cart);
+        return res.status(201).json(await attachSummary(pool, cart));
       }
 
       if (req.method === "PUT") {
@@ -231,7 +339,7 @@ function createCartHandler({ getPool }) {
         const pool = getPool();
         await validateCartItemQuantities(pool, items);
         const cart = await updateCart(pool, { sessionId, items });
-        return res.status(200).json(cart);
+        return res.status(200).json(await attachSummary(pool, cart));
       }
 
       if (req.method === "DELETE") {

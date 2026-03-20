@@ -19,6 +19,15 @@ function readPositiveInt(value, fallback) {
   return parsed > 0 ? parsed : fallback;
 }
 
+function readPositiveNumber(value, fallback) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function readBoolean(value, fallback) {
   if (value === undefined || value === null || value === "") {
     return fallback;
@@ -49,6 +58,7 @@ const env = {
   dbConnectionTimeoutMs: readInt(process.env.DB_CONNECTION_TIMEOUT_MS, 10000),
   priceCurrency: process.env.PRICE_CURRENCY || "USD",
   maxCartQty: readPositiveInt(process.env.MAX_CART_QTY, 5),
+  maxCartWorkDays: readPositiveNumber(process.env.MAX_CART_WORK_DAYS, 4),
   appBaseUrl: process.env.APP_BASE_URL,
   stripeSecretKey: process.env.STRIPE_SECRET_KEY,
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
