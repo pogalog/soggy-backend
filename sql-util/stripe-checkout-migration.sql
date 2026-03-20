@@ -26,7 +26,7 @@ create index if not exists idx_orders_created_at on orders(created_at);
 
 create table if not exists order_items (
   order_id         text not null references orders(id) on delete cascade,
-  product_id       text not null references products(id),
+  product_id       text not null,
   sku              text not null,
   name             text not null,
   unit_amount      integer not null check (unit_amount >= 0),
@@ -38,3 +38,30 @@ create table if not exists order_items (
 
 create index if not exists idx_order_items_order_id on order_items(order_id);
 create index if not exists idx_order_items_product_id on order_items(product_id);
+
+do $$
+declare
+  constraint_name text;
+begin
+  select tc.constraint_name
+    into constraint_name
+  from information_schema.table_constraints tc
+  join information_schema.key_column_usage kcu
+    on tc.constraint_name = kcu.constraint_name
+   and tc.table_schema = kcu.table_schema
+  where tc.table_schema = current_schema()
+    and tc.table_name = 'order_items'
+    and tc.constraint_type = 'FOREIGN KEY'
+    and kcu.column_name = 'product_id'
+  limit 1;
+
+  if constraint_name is not null then
+    execute format(
+      'alter table %I.%I drop constraint %I',
+      current_schema(),
+      'order_items',
+      constraint_name
+    );
+  end if;
+end
+$$;

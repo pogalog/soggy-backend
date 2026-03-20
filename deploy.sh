@@ -1,44 +1,120 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${PROJECT_ID:?Set PROJECT_ID}"
-: "${DB_USER:?Set DB_USER}"
-: "${DB_PASS:?Set DB_PASS}"
-: "${DB_NAME:?Set DB_NAME}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SETUP_SCRIPT="${SCRIPT_DIR}/deploy-setup.sh"
 
-FUNCTION_NAME="${FUNCTION_NAME:-getProduct}"
+if [[ -f "${SETUP_SCRIPT}" ]]; then
+  # Load project-specific deploy defaults into the current shell before computing args.
+  # shellcheck disable=SC1090
+  source "${SETUP_SCRIPT}"
+fi
+
+PROJECT_ID="${PROJECT_ID:-soggy-stitches}"
+FUNCTION_NAME="${FUNCTION_NAME:-products}"
 ENTRY_POINT="${ENTRY_POINT:-api}"
 REGION="${REGION:-us-east1}"
-RUNTIME="${RUNTIME:-nodejs20}"
+RUNTIME="${RUNTIME:-nodejs22}"
+SECRET_VERSION="${SECRET_VERSION:-latest}"
+DB_USER_SECRET="${DB_USER_SECRET:-DB_USER}"
+DB_PASS_SECRET="${DB_PASS_SECRET:-DB_PASS}"
+DB_NAME_SECRET="${DB_NAME_SECRET:-DB_NAME}"
+INSTANCE_CONNECTION_NAME_SECRET="${INSTANCE_CONNECTION_NAME_SECRET:-INSTANCE_CONNECTION_NAME}"
+SMTP_PASS_SECRET="${SMTP_PASS_SECRET:-SMTP_PASS}"
+SECRET_ENV_KEYS=("DB_USER" "DB_PASS" "DB_NAME" "INSTANCE_CONNECTION_NAME" "SMTP_PASS")
 
-ENV_VARS="DB_USER=${DB_USER},DB_PASS=${DB_PASS},DB_NAME=${DB_NAME}"
+join_by() {
+  local delimiter="$1"
+  shift
+  local IFS="${delimiter}"
+  printf '%s' "$*"
+}
 
-if [[ -n "${PRICE_CURRENCY:-}" ]]; then
-  ENV_VARS="${ENV_VARS},PRICE_CURRENCY=${PRICE_CURRENCY}"
-fi
+append_env_var_if_set() {
+  local key="$1"
+  local value="${!key-}"
 
-if [[ -n "${INSTANCE_CONNECTION_NAME:-}" ]]; then
-  gcloud functions deploy "${FUNCTION_NAME}" \
-    --gen2 \
-    --project="${PROJECT_ID}" \
-    --region="${REGION}" \
-    --runtime="${RUNTIME}" \
-    --source="." \
-    --entry-point="${ENTRY_POINT}" \
-    --trigger-http \
-    # --allow-unauthenticated \
-    --set-env-vars="${ENV_VARS},INSTANCE_CONNECTION_NAME=${INSTANCE_CONNECTION_NAME}"
-else
-  : "${DB_HOST:?Set DB_HOST when INSTANCE_CONNECTION_NAME is not provided}"
+  if [[ -n "${value}" ]]; then
+    ENV_VARS+=("${key}=${value}")
+  fi
+}
+
+secret_ref() {
+  local secret_name="$1"
+
+  if [[ "${secret_name}" == projects/* ]]; then
+    printf '%s' "${secret_name}"
+    return 0
+  fi
+
+  if [[ "${secret_name}" == *:* ]]; then
+    printf '%s' "${secret_name}"
+    return 0
+  fi
+
+  printf '%s:%s' "${secret_name}" "${SECRET_VERSION}"
+}
+
+ENV_VARS=()
+SECRET_VARS=(
+  "DB_USER=$(secret_ref "${DB_USER_SECRET}")"
+  "DB_PASS=$(secret_ref "${DB_PASS_SECRET}")"
+  "DB_NAME=$(secret_ref "${DB_NAME_SECRET}")"
+  "SMTP_PASS=$(secret_ref "${SMTP_PASS_SECRET}")"
+)
+
+OPTIONAL_ENV_KEYS=(
+  "PRICE_CURRENCY"
+  "DB_SOCKET_PATH"
+  "DB_SSL"
+  "DB_POOL_MAX"
+  "DB_IDLE_TIMEOUT_MS"
+  "DB_CONNECTION_TIMEOUT_MS"
+  "MAX_CART_QTY"
+  "APP_BASE_URL"
+  "STRIPE_SECRET_KEY"
+  "STRIPE_WEBHOOK_SECRET"
+  "STRIPE_TAX_CODE"
+  "COMMISSION_GCS_BUCKET"
+  "COMMISSION_FROM_EMAIL"
+  "COMMISSION_BUSINESS_EMAIL"
+  "COMMISSION_COMPANY_NAME"
+  "COMMISSION_EMAIL_HEADER_IMAGE_URL"
+  "SMTP_SERVICE"
+  "SMTP_HOST"
+  "SMTP_PORT"
+  "SMTP_SECURE"
+  "SMTP_USER"
+)
+
+for key in "${OPTIONAL_ENV_KEYS[@]}"; do
+  append_env_var_if_set "${key}"
+done
+
+if [[ -n "${DB_HOST:-}" ]]; then
   DB_PORT="${DB_PORT:-5432}"
-  gcloud functions deploy "${FUNCTION_NAME}" \
-    --gen2 \
-    --project="${PROJECT_ID}" \
-    --region="${REGION}" \
-    --runtime="${RUNTIME}" \
-    --source="." \
-    --entry-point="${ENTRY_POINT}" \
-    --trigger-http \
-    # --allow-unauthenticated \
-    --set-env-vars="${ENV_VARS},DB_HOST=${DB_HOST},DB_PORT=${DB_PORT}"
+  ENV_VARS+=("DB_HOST=${DB_HOST}" "DB_PORT=${DB_PORT}")
+else
+  SECRET_VARS+=(
+    "INSTANCE_CONNECTION_NAME=$(secret_ref "${INSTANCE_CONNECTION_NAME_SECRET}")"
+  )
 fi
+
+DEPLOY_ARGS=(
+  gcloud functions deploy "${FUNCTION_NAME}"
+  --gen2
+  --project="${PROJECT_ID}"
+  --region="${REGION}"
+  --runtime="${RUNTIME}"
+  --source="."
+  --entry-point="${ENTRY_POINT}"
+  --trigger-http
+  --remove-env-vars="$(join_by , "${SECRET_ENV_KEYS[@]}")"
+  --update-secrets="$(join_by , "${SECRET_VARS[@]}")"
+)
+
+if [[ ${#ENV_VARS[@]} -gt 0 ]]; then
+  DEPLOY_ARGS+=(--update-env-vars="$(join_by , "${ENV_VARS[@]}")")
+fi
+
+"${DEPLOY_ARGS[@]}"

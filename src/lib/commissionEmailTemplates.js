@@ -20,6 +20,17 @@ const theme = {
   footerBg: "#0b0b10"
 };
 
+const commissionDateFormatter = new Intl.DateTimeFormat("en-US", {
+  month: "long",
+  day: "numeric",
+  year: "numeric"
+});
+
+const currencyFormatter = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: env.priceCurrency || "USD"
+});
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -119,6 +130,24 @@ function buildFooterHtml({ replyEmail, introText, labelText }) {
   `;
 }
 
+function formatDisplayDate(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Not provided";
+  }
+
+  return commissionDateFormatter.format(date);
+}
+
+function formatCurrencyFromCents(value) {
+  const cents = Number(value);
+  if (!Number.isFinite(cents)) {
+    return "Not provided";
+  }
+
+  return currencyFormatter.format(cents / 100);
+}
+
 function buildDetailRow(label, value) {
   const displayValue =
     value === undefined || value === null || value === ""
@@ -161,6 +190,36 @@ function buildTable(rows) {
   `;
 }
 
+function buildActionButton(label, href) {
+  return `
+    <div style="margin-top:18px;text-align:center;">
+      <a href="${escapeHtml(href)}" style="display:inline-block;padding:14px 24px;border-radius:999px;background:linear-gradient(135deg, ${theme.purple} 0%, ${theme.purpleDeep} 100%);color:${theme.textPrimary};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;font-weight:700;letter-spacing:0.2px;text-decoration:none;">
+        ${escapeHtml(label)}
+      </a>
+    </div>
+  `;
+}
+
+function buildCenteredValueBlock({ label, value, helperText }) {
+  return `
+    <div style="margin-top:18px;padding:20px 22px;text-align:center;background:
+      linear-gradient(135deg, rgba(155,109,255,0.14) 0%, rgba(215,178,74,0.12) 100%),
+      ${theme.mutedPanel};border:1px solid ${theme.panelBorder};border-radius:18px;">
+      <div style="margin:0 0 8px 0;color:${theme.gold};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:12px;font-weight:700;letter-spacing:3.2px;text-transform:uppercase;">
+        ${escapeHtml(label)}
+      </div>
+      <div style="margin:0;color:${theme.textPrimary};font-family:'Trebuchet MS','Avenir Next','Segoe UI',Arial,sans-serif;font-size:31px;font-weight:700;line-height:1.2;">
+        ${escapeHtml(value)}
+      </div>
+      ${
+        helperText
+          ? `<div style="margin-top:10px;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:14px;line-height:1.65;">${escapeHtml(helperText)}</div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
 function buildImageListHtml(images) {
   if (!Array.isArray(images) || images.length === 0) {
     return `
@@ -190,6 +249,24 @@ function buildImageListHtml(images) {
       </ul>
     </div>
   `;
+}
+
+function buildCommissionLifecycleRows(commission) {
+  return [
+    buildDetailRow("Commission ID", commission.id),
+    buildDetailRow("Item", commission.itemName),
+    buildDetailRow("Description", commission.itemDescription),
+    buildDetailRow("Yarn Type", commission.yarnType),
+    buildColorSwatchDetailRow("Yarn Color", commission.yarnColor),
+    buildDetailRow(
+      "Attachment Material",
+      commission.attachmentMaterialType
+    ),
+    buildDetailRow(
+      "Commission Request Date",
+      formatDisplayDate(commission.createdAt)
+    )
+  ];
 }
 
 function buildEmailShell({ title, bodyHtml, footer }) {
@@ -310,6 +387,228 @@ function buildBusinessCommissionEmail({ commissionId, request, imageLinks }) {
   };
 }
 
+function buildCommissionCommitEmail({ commission }) {
+  const rows = buildCommissionLifecycleRows(commission);
+  const commissionUrl = `https://www.soggystitches.com/commission/${encodeURIComponent(
+    commission.id
+  )}`;
+  const estimatedCompletionDate = new Date();
+  estimatedCompletionDate.setDate(
+    estimatedCompletionDate.getDate() + Number(commission.timeCostDays)
+  );
+  const commitmentMessage = commission.requiresCommit
+    ? "After reviewing your request, we determined that a commitment deposit is needed to cover material costs before work can proceed. Please use the link below to review the deposit amount and provide payment."
+    : "After reviewing your request, we are ready to move forward without an upfront materials payment. Please use the link below to confirm that you would like us to proceed with the work.";
+
+  const bodyHtml = `
+    <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">We have reviewed your request and prepared a quote for the estimated time to completion and the amount we expect to charge for the work and product.</p>
+    <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:16px;line-height:1.75;">The quoted price should generally be treated as the maximum total for the commission. The final amount may be lower, but it will not exceed this quote unless a revised quote is sent after additional discovery or requested corrections.</p>
+    ${buildSectionLabel("Commission Details")}
+    ${buildTable(rows)}
+    <div style="margin-top:22px;padding:20px;background:
+      linear-gradient(135deg, rgba(155,109,255,0.12) 0%, rgba(215,178,74,0.08) 100%),
+      ${theme.mutedPanel};border:1px solid ${theme.panelBorder};border-radius:18px;">
+      ${buildSectionLabel("Next Step")}
+      <p style="margin:0 0 12px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.75;">${escapeHtml(commitmentMessage)}</p>
+      ${
+        commission.requiresCommit
+          ? `<p style="margin:0 0 12px 0;color:${theme.textPrimary};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;font-weight:700;line-height:1.75;">Your commitment deposit due today is ${escapeHtml(formatCurrencyFromCents(commission.commitmentDepositCents))}.</p>`
+          : ""
+      }
+      <p style="margin:0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.75;">If you decide to cancel at this point, that is fine too. Please visit the same link below and let us know that you need to cancel the request.</p>
+      ${buildActionButton(
+        commission.requiresCommit
+          ? "Review Commitment"
+          : "Confirm Commission",
+        commissionUrl
+      )}
+    </div>
+    ${buildCenteredValueBlock({
+      label: "Total Cost",
+      value: formatCurrencyFromCents(commission.totalCostCents)
+    })}
+    ${
+      commission.requiresCommit
+        ? buildCenteredValueBlock({
+            label: "Commitment Deposit",
+            value: formatCurrencyFromCents(commission.commitmentDepositCents),
+            helperText:
+              "This deposit is the amount due now to begin work. The remaining balance is handled later."
+          })
+        : ""
+    }
+    ${buildCenteredValueBlock({
+      label: "Estimated Time To Completion",
+      value: formatDisplayDate(estimatedCompletionDate),
+      helperText:
+        "This estimated ship-by date is calculated from the date you commit to the work. If you commit later, the completion date will move accordingly."
+    })}
+  `;
+
+  return {
+    subject: `Your commission quote is ready (${commission.id})`,
+    html: buildEmailShell({
+      title: "Commission Quote Ready",
+      bodyHtml,
+      footer: {
+        replyEmail: env.commissionFromEmail,
+        introText:
+          "You can reply directly to this email if you have questions about the quote or the next step.",
+        labelText: "Reply to"
+      }
+    })
+  };
+}
+
+function buildCommissionFinalizeEmail({ commission }) {
+  const rows = buildCommissionLifecycleRows(commission);
+  const commissionUrl = `https://www.soggystitches.com/commission/${encodeURIComponent(
+    commission.id
+  )}`;
+
+  const bodyHtml = `
+    <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">Your commission is finished and ready for final checkout.</p>
+    <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:16px;line-height:1.75;">Please use the link below to review the completed commission and pay any remaining balance so we can prepare it for shipment.</p>
+    ${buildSectionLabel("Commission Details")}
+    ${buildTable(rows)}
+    <div style="margin-top:22px;padding:20px;background:
+      linear-gradient(135deg, rgba(155,109,255,0.12) 0%, rgba(215,178,74,0.08) 100%),
+      ${theme.mutedPanel};border:1px solid ${theme.panelBorder};border-radius:18px;">
+      ${buildSectionLabel("Final Checkout")}
+      <p style="margin:0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.75;">When payment is complete, we can move ahead with shipping your finished item.</p>
+      ${buildActionButton("Complete Final Checkout", commissionUrl)}
+    </div>
+    ${buildCenteredValueBlock({
+      label: "Total Cost",
+      value: formatCurrencyFromCents(commission.totalCostCents)
+    })}
+  `;
+
+  return {
+    subject: `Your commission is ready for final checkout (${commission.id})`,
+    html: buildEmailShell({
+      title: "Commission Ready To Ship",
+      bodyHtml,
+      footer: {
+        replyEmail: env.commissionFromEmail,
+        introText:
+          "Reply directly to this email if you need help with final checkout or shipping details.",
+        labelText: "Reply to"
+      }
+    })
+  };
+}
+
+function buildCommissionCustomerDecisionBusinessEmail({
+  commission,
+  action,
+  customerEmail
+}) {
+  const rows = [
+    buildDetailRow("Commission ID", commission.id),
+    buildDetailRow("Customer action", action === "cancel" ? "Cancelled" : "Committed"),
+    buildDetailRow("Customer email", customerEmail),
+    buildDetailRow("Item", commission.itemName),
+    buildDetailRow("Description", commission.itemDescription),
+    buildDetailRow("Quoted total", formatCurrencyFromCents(commission.totalCostCents)),
+    buildDetailRow(
+      "Commitment deposit",
+      commission.requiresCommit
+        ? formatCurrencyFromCents(commission.commitmentDepositCents)
+        : "Not required"
+    ),
+    buildDetailRow(
+      "Estimated ship-by",
+      commission.shipDate ? formatDisplayDate(commission.shipDate) : "Not provided"
+    ),
+    buildDetailRow("Current status", commission.status)
+  ];
+
+  const bodyHtml = `
+    <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">
+      The customer has ${action === "cancel" ? "cancelled" : "confirmed"} the commission request.
+    </p>
+    ${buildSectionLabel("Commission Details")}
+    ${buildTable(rows)}
+  `;
+
+  return {
+    subject: `${
+      action === "cancel" ? "Commission cancelled" : "Commission confirmed"
+    } (${commission.id})`,
+    html: buildEmailShell({
+      title: action === "cancel" ? "Commission Cancelled" : "Commission Confirmed",
+      bodyHtml,
+      footer: {
+        replyEmail: env.commissionBusinessEmail,
+        introText:
+          "Reply directly to the customer if you need to follow up about this commission update.",
+        labelText: "Business inbox"
+      }
+    })
+  };
+}
+
+function buildCommissionCustomerDecisionCustomerEmail({ commission, action }) {
+  const rows = [
+    buildDetailRow("Commission ID", commission.id),
+    buildDetailRow("Item", commission.itemName),
+    buildDetailRow("Description", commission.itemDescription),
+    buildDetailRow("Quoted total", formatCurrencyFromCents(commission.totalCostCents)),
+    buildDetailRow(
+      "Commitment deposit",
+      commission.requiresCommit
+        ? formatCurrencyFromCents(commission.commitmentDepositCents)
+        : "Not required"
+    ),
+    buildDetailRow(
+      "Estimated ship-by",
+      commission.shipDate ? formatDisplayDate(commission.shipDate) : "Not provided"
+    )
+  ];
+
+  const bodyHtml =
+    action === "cancel"
+      ? `
+        <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">
+          Your commission request has been marked as cancelled.
+        </p>
+        <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:16px;line-height:1.75;">
+          We are so sorry to see you go. We hope you will seek our services for your future creations.
+        </p>
+        ${buildSectionLabel("Commission Details")}
+        ${buildTable(rows)}
+      `
+      : `
+        <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">
+          Your commission is now moving forward.
+        </p>
+        <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:16px;line-height:1.75;">
+          Thank you for choosing Soggy Stitches.
+        </p>
+        ${buildSectionLabel("Commission Details")}
+        ${buildTable(rows)}
+      `;
+
+  return {
+    subject: `${
+      action === "cancel" ? "Commission request cancelled" : "Commission confirmed"
+    } (${commission.id})`,
+    html: buildEmailShell({
+      title: action === "cancel" ? "Commission Cancelled" : "Commission Confirmed",
+      bodyHtml,
+      footer: {
+        replyEmail: env.commissionFromEmail,
+        introText:
+          action === "cancel"
+            ? "Reply directly to this email if you would like to revisit the project in the future."
+            : "Reply directly to this email if you have any questions while we prepare your commission.",
+        labelText: "Reply to"
+      }
+    })
+  };
+}
+
 function mapStorageImagesToLinks(storage) {
   const images = Array.isArray(storage && storage.images) ? storage.images : [];
 
@@ -343,5 +642,9 @@ function mapStorageImagesToLinks(storage) {
 module.exports = {
   buildCustomerCommissionEmail,
   buildBusinessCommissionEmail,
+  buildCommissionCommitEmail,
+  buildCommissionFinalizeEmail,
+  buildCommissionCustomerDecisionBusinessEmail,
+  buildCommissionCustomerDecisionCustomerEmail,
   mapStorageImagesToLinks
 };

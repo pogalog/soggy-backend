@@ -4,7 +4,7 @@ create table if not exists products (
   title         text not null,
   description   text,
   sell_price_cents   integer not null,
-  inventory_qty integer not null default 0,
+  days_to_create numeric(8,2) not null default 1 check (days_to_create >= 0),
   stripe_thumb_url text,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()

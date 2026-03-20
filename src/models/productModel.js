@@ -8,7 +8,7 @@ const PRODUCT_BY_ID_SQL = `
     p.title,
     p.description,
     p.sell_price_cents,
-    p.inventory_qty,
+    p.days_to_create,
     p.created_at,
     p.updated_at,
     COALESCE(
@@ -28,10 +28,28 @@ const PRODUCT_BY_ID_SQL = `
   GROUP BY p.id
 `;
 
-const PRODUCT_INVENTORY_BY_IDS_SQL = `
+const COMMISSION_PRODUCT_BY_ID_SQL = `
   SELECT
     id,
-    inventory_qty
+    item_name,
+    item_description,
+    commitment_deposit_amount,
+    total_cost,
+    status,
+    requires_commit,
+    storage_bucket,
+    storage_images,
+    created_at,
+    updated_at
+  FROM commissions
+  WHERE id = $1
+  LIMIT 1
+`;
+
+const PRODUCT_WORK_BY_IDS_SQL = `
+  SELECT
+    id,
+    days_to_create
   FROM products
   WHERE id = ANY($1::text[])
 `;
@@ -41,9 +59,26 @@ const PRODUCTS_FOR_CHECKOUT_BY_IDS_SQL = `
     id,
     title,
     sell_price_cents,
-    inventory_qty,
+    days_to_create,
     stripe_thumb_url
   FROM products
+  WHERE id = ANY($1::text[])
+`;
+
+const COMMISSIONS_FOR_CHECKOUT_BY_IDS_SQL = `
+  SELECT
+    id,
+    item_name,
+    item_description,
+    commitment_deposit_amount,
+    total_cost,
+    status,
+    requires_commit,
+    storage_bucket,
+    storage_images,
+    created_at,
+    updated_at
+  FROM commissions
   WHERE id = ANY($1::text[])
 `;
 
@@ -56,6 +91,22 @@ function formatMoney(cents, currency) {
   return formatter.format(amount / 100);
 }
 
+function isCommissionProductId(productId) {
+  return typeof productId === "string" && /^cm_[0-9a-f]+$/i.test(productId);
+}
+
+function canCheckoutCommissionRow(row) {
+  if (!row || row.requires_commit !== true) {
+    return false;
+  }
+
+  if (!Number.isInteger(Number(row.commitment_deposit_amount))) {
+    return false;
+  }
+
+  return row.status !== "customer_cancelled" && row.status !== "customer_committed";
+}
+
 function mapProductRow(row) {
   return {
     id: row.id,
@@ -66,8 +117,29 @@ function mapProductRow(row) {
       currency: env.priceCurrency,
       display: formatMoney(row.sell_price_cents, env.priceCurrency)
     },
-    inventoryQty: row.inventory_qty,
+    daysToCreate: Number(row.days_to_create),
     images: row.images || [],
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString()
+  };
+}
+
+function mapCommissionRow(row) {
+  return {
+    id: row.id,
+    title: `Commission commitment: ${row.item_name}`,
+    description:
+      typeof row.item_description === "string" && row.item_description.trim()
+        ? row.item_description.trim()
+        : `Commitment payment for commission ${row.id}`,
+    price: {
+      amount: Number(row.commitment_deposit_amount),
+      currency: env.priceCurrency,
+      display: formatMoney(row.commitment_deposit_amount, env.priceCurrency)
+    },
+    daysToCreate: 0,
+    images: [],
+    kind: "commission_commitment",
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString()
   };
@@ -75,22 +147,50 @@ function mapProductRow(row) {
 
 async function getProductById(pool, productId) {
   const result = await pool.query(PRODUCT_BY_ID_SQL, [productId]);
-  if (result.rowCount === 0) {
+  if (result.rowCount > 0) {
+    return mapProductRow(result.rows[0]);
+  }
+
+  if (!isCommissionProductId(productId)) {
     return null;
   }
 
-  return mapProductRow(result.rows[0]);
+  const commissionResult = await pool.query(COMMISSION_PRODUCT_BY_ID_SQL, [productId]);
+  if (commissionResult.rowCount === 0) {
+    return null;
+  }
+
+  const commissionRow = commissionResult.rows[0];
+  if (!canCheckoutCommissionRow(commissionRow)) {
+    return null;
+  }
+
+  return mapCommissionRow(commissionRow);
 }
 
-async function getProductInventoryByIds(pool, productIds) {
+async function getProductWorkByIds(pool, productIds) {
   if (!Array.isArray(productIds) || productIds.length === 0) {
     return new Map();
   }
 
-  const result = await pool.query(PRODUCT_INVENTORY_BY_IDS_SQL, [productIds]);
-  return new Map(
-    result.rows.map((row) => [row.id, Number(row.inventory_qty)])
+  const result = await pool.query(PRODUCT_WORK_BY_IDS_SQL, [productIds]);
+  const workById = new Map(
+    result.rows.map((row) => [row.id, Number(row.days_to_create)])
   );
+
+  const commissionIds = productIds.filter((productId) => isCommissionProductId(productId));
+  if (commissionIds.length === 0) {
+    return workById;
+  }
+
+  const commissionResult = await pool.query(COMMISSIONS_FOR_CHECKOUT_BY_IDS_SQL, [commissionIds]);
+  for (const row of commissionResult.rows) {
+    if (canCheckoutCommissionRow(row)) {
+      workById.set(row.id, 0);
+    }
+  }
+
+  return workById;
 }
 
 async function getProductsForCheckoutByIds(pool, productIds) {
@@ -99,25 +199,49 @@ async function getProductsForCheckoutByIds(pool, productIds) {
   }
 
   const result = await pool.query(PRODUCTS_FOR_CHECKOUT_BY_IDS_SQL, [productIds]);
-  return new Map(
+  const productsById = new Map(
     result.rows.map((row) => [
       row.id,
       {
         id: row.id,
         title: row.title,
         sellPriceCents: Number(row.sell_price_cents),
-        inventoryQty: Number(row.inventory_qty),
+        daysToCreate: Number(row.days_to_create),
         stripeThumbUrl:
           typeof row.stripe_thumb_url === "string" && row.stripe_thumb_url.trim()
             ? row.stripe_thumb_url.trim()
-            : null
+            : null,
+        kind: "product"
       }
     ])
   );
+
+  const commissionIds = productIds.filter((productId) => isCommissionProductId(productId));
+  if (commissionIds.length === 0) {
+    return productsById;
+  }
+
+  const commissionResult = await pool.query(COMMISSIONS_FOR_CHECKOUT_BY_IDS_SQL, [commissionIds]);
+  for (const row of commissionResult.rows) {
+    if (!canCheckoutCommissionRow(row)) {
+      continue;
+    }
+
+    productsById.set(row.id, {
+      id: row.id,
+      title: `Commission commitment: ${row.item_name}`,
+      sellPriceCents: Number(row.commitment_deposit_amount),
+      daysToCreate: 0,
+      stripeThumbUrl: null,
+      kind: "commission_commitment"
+    });
+  }
+
+  return productsById;
 }
 
 module.exports = {
   getProductById,
-  getProductInventoryByIds,
+  getProductWorkByIds,
   getProductsForCheckoutByIds
 };

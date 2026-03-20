@@ -23,7 +23,7 @@ create index if not exists idx_orders_created_at on orders(created_at);
 -- order_items
 create table if not exists order_items (
   order_id         text not null references orders(id) on delete cascade,
-  product_id       text not null references products(id),
+  product_id       text not null,
   sku              text not null,
   name             text not null,
   unit_amount      integer not null check (unit_amount >= 0),
