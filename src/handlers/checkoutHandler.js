@@ -7,6 +7,10 @@ const {
   createPendingOrder,
   setOrderStripeCheckoutSessionId
 } = require("../models/orderModel");
+const {
+  normalizeShippingDetailsInput,
+  quoteCheapestShipping
+} = require("../lib/shippingQuote");
 const { getStripeClient } = require("../lib/stripeClient");
 
 function withStatusError(message, statusCode) {
@@ -82,10 +86,33 @@ function normalizeCheckoutRequest(body) {
     throw withStatusError("channel must be either 'online' or 'market'", 400);
   }
 
+  const shippingDetails =
+    body.shippingDetails === undefined || body.shippingDetails === null
+      ? null
+      : normalizeShippingDetailsInput(body.shippingDetails, { requireName: false });
+
   return {
     cartSessionId,
-    channel
+    channel,
+    shippingDetails
   };
+}
+
+function getAllowedShippingCountries() {
+  const allowedCountries = Array.isArray(env.stripeShippingAllowedCountries)
+    ? env.stripeShippingAllowedCountries.filter(
+        (country) => typeof country === "string" && country.trim()
+      )
+    : [];
+
+  if (allowedCountries.length === 0) {
+    throw withStatusError(
+      "STRIPE_SHIPPING_ALLOWED_COUNTRIES must include at least one country",
+      500
+    );
+  }
+
+  return allowedCountries;
 }
 
 function buildPreparedOrderItems({ cartItems, productsById }) {
@@ -165,6 +192,34 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
   return preparedItems;
 }
 
+function cartRequiresShipping(cartItems, productsById) {
+  return cartItems.some((item) => {
+    const product = productsById.get(item.productId);
+    return product && product.kind !== "commission_commitment";
+  });
+}
+
+function validateShippingDetailsForCheckout(shippingDetails) {
+  if (!shippingDetails) {
+    throw withStatusError(
+      "shippingDetails are required to calculate shipping before checkout",
+      400
+    );
+  }
+
+  if (!shippingDetails.name) {
+    throw withStatusError("shippingDetails.name is required", 400);
+  }
+
+  const allowedCountries = getAllowedShippingCountries();
+  if (!allowedCountries.includes(shippingDetails.address.country)) {
+    throw withStatusError(
+      `Shipping is currently limited to ${allowedCountries.join(", ")}`,
+      422
+    );
+  }
+}
+
 function buildStripeLineItems(items) {
   const stripeCurrency = String(env.priceCurrency || "USD").toLowerCase();
   const stripeTaxCode =
@@ -172,11 +227,13 @@ function buildStripeLineItems(items) {
 
   return items.map((item) => {
     const productData = {
-      name: item.name
+      name: item.name,
+      metadata: {
+        product_id: String(item.productId),
+        sku: String(item.sku)
+      }
     };
 
-    // Stripe Checkout inline price_data keeps Stripe Products/Prices out of our source of truth.
-    // Shared tax code and optional public thumbnail URL both belong on product_data here.
     if (stripeTaxCode) {
       productData.tax_code = stripeTaxCode;
     }
@@ -195,6 +252,78 @@ function buildStripeLineItems(items) {
   });
 }
 
+function buildStripeShippingOptions(quote) {
+  if (!quote) {
+    return undefined;
+  }
+
+  const shippingRateData = {
+    type: "fixed_amount",
+    fixed_amount: {
+      amount: quote.amountCents,
+      currency: String(quote.currency || env.priceCurrency || "USD").toLowerCase()
+    },
+    display_name: quote.serviceName,
+    metadata: {
+      carrier: quote.carrier || "UPS",
+      service_code: quote.serviceCode || "",
+      quoted_at: quote.quotedAt || ""
+    }
+  };
+
+  if (env.stripeShippingTaxCode && env.stripeShippingTaxCode.trim()) {
+    shippingRateData.tax_code = env.stripeShippingTaxCode.trim();
+    shippingRateData.tax_behavior = "exclusive";
+  }
+
+  if (Number.isFinite(quote.businessDaysInTransit) && quote.businessDaysInTransit > 0) {
+    shippingRateData.delivery_estimate = {
+      minimum: {
+        unit: "business_day",
+        value: quote.businessDaysInTransit
+      },
+      maximum: {
+        unit: "business_day",
+        value: quote.businessDaysInTransit
+      }
+    };
+  }
+
+  return [
+    {
+      shipping_rate_data: shippingRateData
+    }
+  ];
+}
+
+function toStripeAddress(address) {
+  return {
+    line1: address.line1,
+    line2: address.line2 || undefined,
+    city: address.city,
+    state: address.state,
+    postal_code: address.postalCode,
+    country: address.country
+  };
+}
+
+async function createStripeCustomer(stripe, shippingDetails) {
+  if (!shippingDetails) {
+    return null;
+  }
+
+  const customer = await stripe.customers.create({
+    name: shippingDetails.name || undefined,
+    address: toStripeAddress(shippingDetails.address),
+    shipping: {
+      name: shippingDetails.name || "Customer",
+      address: toStripeAddress(shippingDetails.address)
+    }
+  });
+
+  return customer && typeof customer.id === "string" ? customer.id : null;
+}
+
 function methodNotAllowed(res) {
   res.set("Allow", "POST");
   return res.status(405).json({ error: "Method not allowed" });
@@ -203,7 +332,6 @@ function methodNotAllowed(res) {
 function createCheckoutHandler({ getPool }) {
   return async function checkoutHandler(req, res) {
     let cartSessionId = null;
-    let orderId = null;
 
     try {
       if (req.method !== "POST") {
@@ -228,49 +356,77 @@ function createCheckoutHandler({ getPool }) {
         productsById
       });
 
-      const order = await createPendingOrder(pool, {
+      const requiresShipping =
+        normalized.channel === "online" && cartRequiresShipping(cart.items, productsById);
+      let shippingQuote = null;
+      let shippingDetails = null;
+
+      if (requiresShipping) {
+        validateShippingDetailsForCheckout(normalized.shippingDetails);
+        shippingDetails = normalized.shippingDetails;
+        const quoteResult = await quoteCheapestShipping({
+          productsById,
+          cartItems: cart.items,
+          shippingDetails
+        });
+        shippingQuote = quoteResult.quote;
+      }
+
+      const pendingOrder = await createPendingOrder(pool, {
         cartSessionId,
         channel: normalized.channel,
         currency: String(env.priceCurrency || "USD").toUpperCase(),
-        items: preparedItems
+        items: preparedItems,
+        shippingMethod: shippingQuote ? shippingQuote.serviceName : null,
+        shippingAmount: shippingQuote ? shippingQuote.amountCents : null,
+        shippingDetails,
+        shippingQuote
       });
-      orderId = order.id;
 
       const appBaseUrl = requireAppBaseUrl();
       const stripe = getStripeClient();
-      const session = await stripe.checkout.sessions.create(
-        {
-          mode: "payment",
-          line_items: buildStripeLineItems(preparedItems),
-          automatic_tax: { enabled: true },
-          success_url:
-            `${appBaseUrl}/checkout/success?order_id=${encodeURIComponent(order.id)}` +
-            "&session_id={CHECKOUT_SESSION_ID}",
-          cancel_url: `${appBaseUrl}/checkout/cancel?order_id=${encodeURIComponent(order.id)}`,
-          client_reference_id: cartSessionId,
-          metadata: {
-            order_id: String(order.id),
-            cart_session_id: cartSessionId,
-            channel: normalized.channel
-          }
-        },
-        {
-          idempotencyKey: `checkout_session_order_${order.id}`
+      const customerId = await createStripeCustomer(stripe, shippingDetails);
+      const sessionPayload = {
+        mode: "payment",
+        line_items: buildStripeLineItems(preparedItems),
+        automatic_tax: { enabled: true },
+        billing_address_collection: "required",
+        success_url: `${appBaseUrl}/checkout/success?order_id=${encodeURIComponent(
+          pendingOrder.id
+        )}&session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${appBaseUrl}/checkout`,
+        client_reference_id: cartSessionId,
+        metadata: {
+          cart_session_id: cartSessionId,
+          channel: normalized.channel,
+          order_id: pendingOrder.id
         }
-      );
+      };
 
-      if (!session || !session.url) {
+      if (customerId) {
+        sessionPayload.customer = customerId;
+      } else {
+        sessionPayload.customer_creation = "always";
+      }
+
+      const shippingOptions = buildStripeShippingOptions(shippingQuote);
+      if (shippingOptions) {
+        sessionPayload.shipping_options = shippingOptions;
+      }
+
+      const session = await stripe.checkout.sessions.create(sessionPayload);
+      if (!session || !session.url || typeof session.id !== "string") {
         throw new Error("Stripe Checkout Session did not return a redirect URL");
       }
 
       await setOrderStripeCheckoutSessionId(pool, {
-        orderId: order.id,
+        orderId: pendingOrder.id,
         stripeCheckoutSessionId: session.id
       });
 
       return res.status(201).json({
         checkoutUrl: session.url,
-        orderId: order.id
+        orderId: pendingOrder.id
       });
     } catch (error) {
       if (error instanceof SyntaxError || error.type === "entity.parse.failed") {
@@ -288,7 +444,6 @@ function createCheckoutHandler({ getPool }) {
         method: req.method,
         path: req.path || req.url,
         cartSessionId,
-        orderId,
         message: error.message,
         code: error.code,
         type: error.type

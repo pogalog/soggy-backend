@@ -54,6 +54,28 @@ function isCheckoutSessionRequest(req) {
   );
 }
 
+function isShippingQuoteRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/shipping/quote" ||
+    path === "/shipping/quote/" ||
+    path === "/api/shipping/quote" ||
+    path === "/api/shipping/quote/"
+  );
+}
+
+function isOrderRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/orders" ||
+    path === "/orders/" ||
+    path.startsWith("/orders/") ||
+    path === "/api/orders" ||
+    path === "/api/orders/" ||
+    path.startsWith("/api/orders/")
+  );
+}
+
 function isStripeWebhookRequest(req) {
   const path = normalizePath(req);
   return (
@@ -120,7 +142,9 @@ function createApiHandler({
   productHandler,
   commissionDetailsHandler,
   cartHandler,
+  orderHandler,
   checkoutHandler,
+  shippingQuoteHandler,
   stripeWebhookHandler,
   commissionResponseHandler,
   commissionLifecycleHandler,
@@ -149,6 +173,14 @@ function createApiHandler({
         return checkoutHandler(req, res);
       }
 
+      if (shippingQuoteHandler && isShippingQuoteRequest(req)) {
+        return shippingQuoteHandler(req, res);
+      }
+
+      if (orderHandler && isOrderRequest(req)) {
+        return orderHandler(req, res);
+      }
+
       if (marketHandler && isMarketRequest(req)) {
         return marketHandler(req, res);
       }
@@ -167,7 +199,7 @@ function createApiHandler({
 
       return res.status(404).json({
         error:
-          "Route not found. Use /products/:id, /products/commissions, /markets, /cart/:sessionId, /commissions, /commissions/respond, /commissions/commit, /commission/finalize, /api/checkout/session, or /api/stripe/webhook"
+          "Route not found. Use /products/:id, /products/commissions, /markets, /cart/:sessionId, /commissions, /commissions/respond, /commissions/commit, /commission/finalize, /api/orders/:id, /api/shipping/quote, /api/checkout/session, or /api/stripe/webhook"
       });
     } catch (error) {
       console.error("Unhandled API routing error", {

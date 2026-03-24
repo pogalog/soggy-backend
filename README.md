@@ -13,7 +13,9 @@ Run/deploy one HTTP function and route by path:
   - `POST /cart` (server generates `sessionId`; `/cart/:sessionId` also accepted)
   - `GET|PUT|DELETE /cart/:sessionId`
 - Commission form: `POST /api/commission/form`
+- Order lookup: `GET /api/orders/:id`
 - Checkout: `POST /api/checkout/session`
+- Shipping quote: `POST /api/shipping/quote`
 - Stripe webhook: `POST /api/stripe/webhook`
 
 Legacy exports `getProduct` and `cartService` still exist, but both now point to the same routed handler.
@@ -63,17 +65,71 @@ Request body:
 ```json
 {
   "cartSessionId": "sess_123",
-  "channel": "online"
+  "channel": "online",
+  "shippingDetails": {
+    "name": "Test Customer",
+    "line1": "210 Peachtree St NW",
+    "line2": "",
+    "city": "Atlanta",
+    "state": "GA",
+    "postalCode": "30303",
+    "country": "US"
+  }
 }
 ```
 
 Behavior notes:
 
 - Reads cart items and product pricing from Postgres (client prices are ignored).
-- Creates `orders` + `order_items` rows in Postgres before calling Stripe Checkout.
+- Creates a pending `orders` + `order_items` snapshot in Postgres before calling Stripe Checkout.
+- For online orders with physical items, requires `shippingDetails`, calls the UPS Rating API, and persists the cheapest live UPS option on the order snapshot.
 - Uses inline Stripe `price_data.product_data` (no Stripe Product/Price setup required).
-- Enables Stripe automatic tax and applies optional `STRIPE_TAX_CODE` to each line item.
-- Returns a `checkoutUrl` to redirect the client to Stripe-hosted Checkout.
+- Creates a Stripe Customer with the pre-collected shipping address so hosted Checkout can stay focused on payment while Stripe Tax still has a shipping destination to work from.
+- Adds the quoted UPS method as a fixed Stripe shipping option, preserving the exact service name shown to the customer.
+- Enables Stripe automatic tax and applies optional `STRIPE_TAX_CODE` to each merchandise line item.
+- Attempts to attach the first image found under `STRIPE_THUMBNAILS_GCS_BUCKET/<product_id>/` as the Stripe Checkout product image.
+- Returns both `checkoutUrl` and `orderId`.
+
+## Shipping quote endpoint
+
+- `POST /api/shipping/quote`
+
+Request body:
+
+```json
+{
+  "cartSessionId": "sess_123",
+  "shippingDetails": {
+    "name": "Test Customer",
+    "line1": "210 Peachtree St NW",
+    "line2": "",
+    "city": "Atlanta",
+    "state": "GA",
+    "postalCode": "30303",
+    "country": "US"
+  }
+}
+```
+
+Behavior notes:
+
+- Reads cart items and product shipping dimensions/weight from Postgres.
+- Packs the cart into a single estimated shipment using a soft-goods compression heuristic.
+- Calls the UPS OAuth token endpoint with `UPS_CLIENT_ID` + `UPS_CLIENT_SECRET`.
+- Calls the UPS Rating `Shop` endpoint with negotiated-rate lookup enabled and returns only the cheapest valid option.
+- Returns `shippingRequired: false` when the cart only contains non-shippable commission commitment items.
+
+## Order lookup endpoint
+
+- `GET /api/orders/:id`
+
+Returns the persisted order snapshot from Postgres, including:
+
+- order status
+- currency and totals
+- created/updated timestamps
+- the order item snapshot used for Stripe Checkout
+- persisted shipping method, amount, address, and quote metadata when available
 
 ## Commission form endpoint
 
@@ -137,7 +193,7 @@ Returns the customer-safe commission details needed to render the frontend commi
 
 - `POST /api/stripe/webhook`
 
-This endpoint verifies `Stripe-Signature` using the raw request body (`req.rawBody`) and `STRIPE_WEBHOOK_SECRET`. On `checkout.session.completed`, it marks the order as `paid`, stores Stripe IDs, and decrements inventory in a transaction with idempotent status checks to avoid double-decrementing on retries.
+This endpoint verifies `Stripe-Signature` using the raw request body (`req.rawBody`) and `STRIPE_WEBHOOK_SECRET`. On `checkout.session.completed`, it marks the order as `paid`, stores Stripe IDs, decrements inventory in a transaction with idempotent status checks, and sends a customer confirmation email using the email present on the Checkout Session payload without persisting that email locally.
 
 ## Files
 
@@ -155,8 +211,12 @@ This endpoint verifies `Stripe-Signature` using the raw request body (`req.rawBo
 - `src/lib/commissionEmailTemplates.js`: HTML email rendering for customer/business messages
 - `src/lib/mailer.js`: SMTP mail transport
 - `src/handlers/checkoutHandler.js`: Stripe Checkout Session creation from DB cart state
+- `src/handlers/shippingQuoteHandler.js`: UPS shipping quote lookup from DB cart state
+- `src/handlers/orderHandler.js`: order summary lookup for checkout return pages
 - `src/handlers/stripeWebhookHandler.js`: Stripe webhook signature verification + payment reconciliation
 - `src/models/orderModel.js`: order persistence and transactional payment finalization
+- `src/lib/shippingQuote.js`: shipping address normalization, package estimation, and quote selection
+- `src/lib/upsClient.js`: UPS OAuth token + Rating API client
 - `src/lib/stripeClient.js`: lazy Stripe SDK client loader
 - `cart-schema.sql`: cart table schema
 - `commission-schema.sql`: commission intake table schema
@@ -194,6 +254,7 @@ If you already have an older DB, apply the incremental script instead:
 ```bash
 psql "$DATABASE_URL" -f sql-util/commission-form-migration.sql
 psql "$DATABASE_URL" -f sql-util/stripe-checkout-migration.sql
+psql "$DATABASE_URL" -f sql-util/ups-shipping-migration.sql
 ```
 
 4. Run locally:
@@ -219,11 +280,14 @@ Use the included script:
 ```bash
 PROJECT_ID="your-project-id" \
 REGION="us-central1" \
+ALLOW_UNAUTHENTICATED="true" \
 DB_USER_SECRET="DB_USER" \
 DB_PASS_SECRET="DB_PASS" \
 DB_NAME_SECRET="DB_NAME" \
 INSTANCE_CONNECTION_NAME_SECRET="INSTANCE_CONNECTION_NAME" \
 SMTP_PASS_SECRET="SMTP_PASS" \
+STRIPE_SECRET_KEY_SECRET="STRIPE_SECRET_KEY" \
+STRIPE_WEBHOOK_SECRET_SECRET="STRIPE_WEBHOOK_SECRET" \
 ./deploy.sh
 ```
 
@@ -234,10 +298,19 @@ By default, the script assumes these Secret Manager secret names match the envir
 - `DB_NAME`
 - `INSTANCE_CONNECTION_NAME`
 - `SMTP_PASS`
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
 
 Override the secret names with `*_SECRET` vars if your secret names differ. You can also set `SECRET_VERSION` to use a version other than `latest`.
 
+In this repo's checked-in [`deploy-setup.sh`](/home/anaiah/soggy-cloud-functions/deploy-setup.sh), the project defaults are currently:
+
+- `STRIPE_SECRET_KEY_SECRET=STRIPE_LIVE_KEY`
+- `STRIPE_WEBHOOK_SECRET_SECRET=STRIPE_CHECKOUT_WEBHOOK_SECRET`
+
 The deployed Cloud Function service account must have `roles/secretmanager.secretAccessor` on those secrets.
+
+Stripe webhooks require the HTTP function to accept unauthenticated requests. In this repo's checked-in [`deploy-setup.sh`](/home/anaiah/soggy-cloud-functions/deploy-setup.sh), `ALLOW_UNAUTHENTICATED=true` is enabled so Stripe can reach `/api/stripe/webhook`.
 
 If you use direct TCP instead of Cloud SQL sockets, set `DB_HOST` (and optional `DB_PORT`); in that mode the deploy script will skip `INSTANCE_CONNECTION_NAME`.
 
@@ -248,7 +321,15 @@ To deploy the unified API service, set `ENTRY_POINT=api` (recommended). Existing
 - Currency in the response defaults to `USD` and can be changed with `PRICE_CURRENCY`.
 - DB auth is currently password-based, but deploys now inject `DB_USER`, `DB_PASS`, `DB_NAME`, and `INSTANCE_CONNECTION_NAME` from Secret Manager.
 - Stripe Checkout requires `APP_BASE_URL`, `STRIPE_SECRET_KEY`, and `STRIPE_WEBHOOK_SECRET`.
+- The deploy script injects `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` from Secret Manager.
 - `STRIPE_TAX_CODE` is optional. If set, it is sent on each Checkout line item as `price_data.product_data.tax_code`.
+- `STRIPE_SHIPPING_ALLOWED_COUNTRIES` controls which checkout destinations are supported. It defaults to `US`.
+- `STRIPE_SHIPPING_TAX_CODE` defaults to Stripe's standard shipping tax code (`txcd_92010001`) and applies to the generated shipping rate.
+- UPS checkout shipping requires `UPS_CLIENT_ID`, `UPS_CLIENT_SECRET`, `UPS_SHIPPER_NUMBER`, and `SHIP_FROM_ADDRESS`.
+- `SHIP_FROM_ADDRESS` should be stored as JSON in Secret Manager and include the ship-from name plus line1/city/state/postalCode/country.
+- `UPS_CUSTOMER_CLASSIFICATION` defaults to `04` for retail-location pricing, and `UPS_PICKUP_TYPE` defaults to `03` for counter drop-off style rating. Keep both configurable because a future account-billed label-purchase flow may need different values.
+- The quote packer assumes soft goods and compresses height by `UPS_COMPRESSION_RATIO` (default `0.8`) with `UPS_PACKAGE_PADDING_INCHES` (default `0.5`) added back for a safer carton estimate.
+- `STRIPE_THUMBNAILS_GCS_BUCKET` defaults to `soggy-thumbnails`.
 - Commission email delivery requires SMTP settings (`SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`). The deploy script injects `SMTP_PASS` from Secret Manager.
 - For Gmail, you can instead set `SMTP_SERVICE=gmail` plus `SMTP_USER` and `SMTP_PASS` (Google App Password). In that mode, `SMTP_HOST` is optional.
 - `COMMISSION_FROM_EMAIL` and `COMMISSION_BUSINESS_EMAIL` default to `soggystitches@gmail.com`.
