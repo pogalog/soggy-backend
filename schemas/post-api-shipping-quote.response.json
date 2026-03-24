@@ -1,0 +1,25 @@
+{
+  "shippingRequired": true,
+  "packageSummary": {
+    "weightLbs": 1.2,
+    "dimensionsIn": {
+      "length": 10,
+      "width": 8,
+      "height": 4
+    },
+    "totalUnits": 1
+  },
+  "quote": {
+    "carrier": "UPS",
+    "serviceCode": "03",
+    "serviceName": "UPS Ground",
+    "amountCents": 1412,
+    "currency": "USD",
+    "amountDisplay": "$14.12",
+    "businessDaysInTransit": 1,
+    "estimatedDeliveryDate": "20260325",
+    "estimatedDeliveryTime": "230000",
+    "negotiated": true,
+    "quotedAt": "2026-03-24T16:32:00.000Z"
+  }
+}

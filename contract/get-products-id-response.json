@@ -3,7 +3,17 @@
   "title": "Moon Bunny Plush",
   "description": "…",
   "price": { "amount": 4500, "currency": "USD", "display": "$45.00" },
+  "kind": "product",
   "daysToCreate": 0.5,
+  "shipping": {
+    "weightLbs": 1.25,
+    "dimensionsIn": {
+      "length": 10,
+      "width": 8,
+      "height": 4
+    },
+    "isShippable": true
+  },
   "images": [{ "path": "products/prod_123/1.jpg", "alt": "Front view" }],
   "createdAt": "2026-02-05T21:15:00Z",
   "updatedAt": "2026-02-05T21:15:00Z"

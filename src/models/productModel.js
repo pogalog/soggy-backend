@@ -1,6 +1,7 @@
 "use strict";
 
 const { env } = require("../config/env");
+const { findFirstImageUrlInGcsPrefix } = require("../lib/gcsObjectClient");
 
 const PRODUCT_BY_ID_SQL = `
   SELECT
@@ -9,6 +10,40 @@ const PRODUCT_BY_ID_SQL = `
     p.description,
     p.sell_price_cents,
     p.days_to_create,
+    p.shipping_weight_lbs,
+    p.shipping_length_in,
+    p.shipping_width_in,
+    p.shipping_height_in,
+    p.created_at,
+    p.updated_at,
+    COALESCE(
+      json_agg(
+        json_build_object(
+          'path', pi.path,
+          'alt', pi.alt
+        )
+        ORDER BY pi.sort_order, pi.id
+      ) FILTER (WHERE pi.id IS NOT NULL),
+      '[]'::json
+    ) AS images
+  FROM products p
+  LEFT JOIN product_images pi
+    ON pi.product_id = p.id
+  WHERE p.id = $1
+  GROUP BY p.id
+`;
+
+const PRODUCT_BY_ID_NO_SHIPPING_SQL = `
+  SELECT
+    p.id,
+    p.title,
+    p.description,
+    p.sell_price_cents,
+    p.days_to_create,
+    NULL::numeric AS shipping_weight_lbs,
+    NULL::numeric AS shipping_length_in,
+    NULL::numeric AS shipping_width_in,
+    NULL::numeric AS shipping_height_in,
     p.created_at,
     p.updated_at,
     COALESCE(
@@ -60,7 +95,56 @@ const PRODUCTS_FOR_CHECKOUT_BY_IDS_SQL = `
     title,
     sell_price_cents,
     days_to_create,
+    shipping_weight_lbs,
+    shipping_length_in,
+    shipping_width_in,
+    shipping_height_in,
     stripe_thumb_url
+  FROM products
+  WHERE id = ANY($1::text[])
+`;
+
+const PRODUCTS_FOR_CHECKOUT_BY_IDS_NO_THUMB_SQL = `
+  SELECT
+    id,
+    title,
+    sell_price_cents,
+    days_to_create,
+    shipping_weight_lbs,
+    shipping_length_in,
+    shipping_width_in,
+    shipping_height_in,
+    NULL::text AS stripe_thumb_url
+  FROM products
+  WHERE id = ANY($1::text[])
+`;
+
+const PRODUCTS_FOR_CHECKOUT_BY_IDS_NO_SHIPPING_SQL = `
+  SELECT
+    id,
+    title,
+    sell_price_cents,
+    days_to_create,
+    NULL::numeric AS shipping_weight_lbs,
+    NULL::numeric AS shipping_length_in,
+    NULL::numeric AS shipping_width_in,
+    NULL::numeric AS shipping_height_in,
+    stripe_thumb_url
+  FROM products
+  WHERE id = ANY($1::text[])
+`;
+
+const PRODUCTS_FOR_CHECKOUT_BY_IDS_NO_THUMB_OR_SHIPPING_SQL = `
+  SELECT
+    id,
+    title,
+    sell_price_cents,
+    days_to_create,
+    NULL::numeric AS shipping_weight_lbs,
+    NULL::numeric AS shipping_length_in,
+    NULL::numeric AS shipping_width_in,
+    NULL::numeric AS shipping_height_in,
+    NULL::text AS stripe_thumb_url
   FROM products
   WHERE id = ANY($1::text[])
 `;
@@ -117,7 +201,9 @@ function mapProductRow(row) {
       currency: env.priceCurrency,
       display: formatMoney(row.sell_price_cents, env.priceCurrency)
     },
+    kind: "product",
     daysToCreate: Number(row.days_to_create),
+    shipping: mapShippingProfile(row),
     images: row.images || [],
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString()
@@ -138,6 +224,7 @@ function mapCommissionRow(row) {
       display: formatMoney(row.commitment_deposit_amount, env.priceCurrency)
     },
     daysToCreate: 0,
+    shipping: null,
     images: [],
     kind: "commission_commitment",
     createdAt: new Date(row.created_at).toISOString(),
@@ -145,8 +232,128 @@ function mapCommissionRow(row) {
   };
 }
 
+let hasCheckedStripeThumbColumn = false;
+let hasStripeThumbColumn = false;
+const stripeThumbnailUrlCache = new Map();
+let hasCheckedShippingColumns = false;
+let hasShippingColumns = false;
+
+function mapShippingProfile(row) {
+  const weightLbs = Number(row.shipping_weight_lbs);
+  const lengthIn = Number(row.shipping_length_in);
+  const widthIn = Number(row.shipping_width_in);
+  const heightIn = Number(row.shipping_height_in);
+
+  const hasAllDimensions =
+    Number.isFinite(lengthIn) &&
+    lengthIn > 0 &&
+    Number.isFinite(widthIn) &&
+    widthIn > 0 &&
+    Number.isFinite(heightIn) &&
+    heightIn > 0;
+  const hasWeight = Number.isFinite(weightLbs) && weightLbs > 0;
+
+  if (!hasWeight && !hasAllDimensions) {
+    return null;
+  }
+
+  return {
+    weightLbs: hasWeight ? weightLbs : null,
+    dimensionsIn: hasAllDimensions
+      ? {
+          length: lengthIn,
+          width: widthIn,
+          height: heightIn
+        }
+      : null,
+    isShippable: hasWeight && hasAllDimensions
+  };
+}
+
+async function productsHaveStripeThumbColumn(pool) {
+  if (hasCheckedStripeThumbColumn) {
+    return hasStripeThumbColumn;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'products'
+        AND column_name = 'stripe_thumb_url'
+      LIMIT 1
+    `
+  );
+
+  hasCheckedStripeThumbColumn = true;
+  hasStripeThumbColumn = result.rowCount > 0;
+  return hasStripeThumbColumn;
+}
+
+async function productsHaveShippingColumns(pool) {
+  if (hasCheckedShippingColumns) {
+    return hasShippingColumns;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'products'
+        AND column_name IN (
+          'shipping_weight_lbs',
+          'shipping_length_in',
+          'shipping_width_in',
+          'shipping_height_in'
+        )
+    `
+  );
+
+  const columnNames = new Set(result.rows.map((row) => row.column_name));
+  hasCheckedShippingColumns = true;
+  hasShippingColumns =
+    columnNames.has("shipping_weight_lbs") &&
+    columnNames.has("shipping_length_in") &&
+    columnNames.has("shipping_width_in") &&
+    columnNames.has("shipping_height_in");
+  return hasShippingColumns;
+}
+
+async function resolveStripeThumbnailUrl(productId, persistedStripeThumbUrl) {
+  if (typeof persistedStripeThumbUrl === "string" && persistedStripeThumbUrl.trim()) {
+    return persistedStripeThumbUrl.trim();
+  }
+
+  if (stripeThumbnailUrlCache.has(productId)) {
+    return stripeThumbnailUrlCache.get(productId);
+  }
+
+  try {
+    const imageUrl = await findFirstImageUrlInGcsPrefix({
+      bucketName: env.stripeThumbnailsGcsBucket,
+      objectPrefix: productId
+    });
+    stripeThumbnailUrlCache.set(productId, imageUrl);
+    return imageUrl;
+  } catch (error) {
+    console.warn("Unable to resolve Stripe thumbnail URL", {
+      productId,
+      bucketName: env.stripeThumbnailsGcsBucket,
+      message: error instanceof Error ? error.message : String(error)
+    });
+    stripeThumbnailUrlCache.set(productId, null);
+    return null;
+  }
+}
+
 async function getProductById(pool, productId) {
-  const result = await pool.query(PRODUCT_BY_ID_SQL, [productId]);
+  const includeShippingColumns = await productsHaveShippingColumns(pool);
+  const result = await pool.query(
+    includeShippingColumns ? PRODUCT_BY_ID_SQL : PRODUCT_BY_ID_NO_SHIPPING_SQL,
+    [productId]
+  );
   if (result.rowCount > 0) {
     return mapProductRow(result.rows[0]);
   }
@@ -198,22 +405,31 @@ async function getProductsForCheckoutByIds(pool, productIds) {
     return new Map();
   }
 
-  const result = await pool.query(PRODUCTS_FOR_CHECKOUT_BY_IDS_SQL, [productIds]);
+  const includeStripeThumbUrl = await productsHaveStripeThumbColumn(pool);
+  const includeShippingColumns = await productsHaveShippingColumns(pool);
+  const result = await pool.query(
+    includeStripeThumbUrl
+      ? includeShippingColumns
+        ? PRODUCTS_FOR_CHECKOUT_BY_IDS_SQL
+        : PRODUCTS_FOR_CHECKOUT_BY_IDS_NO_SHIPPING_SQL
+      : includeShippingColumns
+        ? PRODUCTS_FOR_CHECKOUT_BY_IDS_NO_THUMB_SQL
+        : PRODUCTS_FOR_CHECKOUT_BY_IDS_NO_THUMB_OR_SHIPPING_SQL,
+    [productIds]
+  );
+  const normalizedRows = await Promise.all(
+    result.rows.map(async (row) => ({
+      id: row.id,
+      title: row.title,
+      sellPriceCents: Number(row.sell_price_cents),
+      daysToCreate: Number(row.days_to_create),
+      stripeThumbUrl: await resolveStripeThumbnailUrl(row.id, row.stripe_thumb_url),
+      shipping: mapShippingProfile(row),
+      kind: "product"
+    }))
+  );
   const productsById = new Map(
-    result.rows.map((row) => [
-      row.id,
-      {
-        id: row.id,
-        title: row.title,
-        sellPriceCents: Number(row.sell_price_cents),
-        daysToCreate: Number(row.days_to_create),
-        stripeThumbUrl:
-          typeof row.stripe_thumb_url === "string" && row.stripe_thumb_url.trim()
-            ? row.stripe_thumb_url.trim()
-            : null,
-        kind: "product"
-      }
-    ])
+    normalizedRows.map((row) => [row.id, row])
   );
 
   const commissionIds = productIds.filter((productId) => isCommissionProductId(productId));

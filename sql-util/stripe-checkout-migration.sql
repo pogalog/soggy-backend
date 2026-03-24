@@ -2,6 +2,18 @@
 alter table if exists products
   add column if not exists stripe_thumb_url text;
 
+alter table if exists products
+  add column if not exists shipping_weight_lbs numeric(8,2) check (shipping_weight_lbs > 0);
+
+alter table if exists products
+  add column if not exists shipping_length_in numeric(8,2) check (shipping_length_in > 0);
+
+alter table if exists products
+  add column if not exists shipping_width_in numeric(8,2) check (shipping_width_in > 0);
+
+alter table if exists products
+  add column if not exists shipping_height_in numeric(8,2) check (shipping_height_in > 0);
+
 -- Orders and order item snapshots for Stripe Checkout + webhook reconciliation.
 create table if not exists orders (
   id                         text primary key,
@@ -23,6 +35,18 @@ create table if not exists orders (
 create index if not exists idx_orders_cart_session_id on orders(cart_session_id);
 create index if not exists idx_orders_status on orders(status);
 create index if not exists idx_orders_created_at on orders(created_at);
+
+alter table if exists orders
+  add column if not exists shipping_method text;
+
+alter table if exists orders
+  add column if not exists shipping_amount integer check (shipping_amount >= 0);
+
+alter table if exists orders
+  add column if not exists shipping_details jsonb;
+
+alter table if exists orders
+  add column if not exists shipping_quote jsonb;
 
 create table if not exists order_items (
   order_id         text not null references orders(id) on delete cascade,

@@ -19,6 +19,11 @@ function readPositiveInt(value, fallback) {
   return parsed > 0 ? parsed : fallback;
 }
 
+function readNonNegativeInt(value, fallback) {
+  const parsed = readInt(value, fallback);
+  return parsed >= 0 ? parsed : fallback;
+}
+
 function readPositiveNumber(value, fallback) {
   if (value === undefined || value === null || value === "") {
     return fallback;
@@ -26,6 +31,27 @@ function readPositiveNumber(value, fallback) {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readNumberInRange(value, fallback, bounds) {
+  if (value === undefined || value === null || value === "") {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  if (bounds && Number.isFinite(bounds.min) && parsed < bounds.min) {
+    return fallback;
+  }
+
+  if (bounds && Number.isFinite(bounds.max) && parsed > bounds.max) {
+    return fallback;
+  }
+
+  return parsed;
 }
 
 function readBoolean(value, fallback) {
@@ -42,6 +68,19 @@ function readBoolean(value, fallback) {
   }
 
   return fallback;
+}
+
+function readCsvList(value, fallback) {
+  if (typeof value !== "string" || !value.trim()) {
+    return fallback;
+  }
+
+  const items = value
+    .split(",")
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean);
+
+  return items.length > 0 ? Array.from(new Set(items)) : fallback;
 }
 
 const env = {
@@ -63,6 +102,35 @@ const env = {
   stripeSecretKey: process.env.STRIPE_SECRET_KEY,
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
   stripeTaxCode: process.env.STRIPE_TAX_CODE,
+  stripeShippingAllowedCountries: readCsvList(
+    process.env.STRIPE_SHIPPING_ALLOWED_COUNTRIES,
+    ["US"]
+  ),
+  stripeShippingTaxCode:
+    process.env.STRIPE_SHIPPING_TAX_CODE || "txcd_92010001",
+  stripeThumbnailsGcsBucket:
+    process.env.STRIPE_THUMBNAILS_GCS_BUCKET || "soggy-thumbnails",
+  upsClientId: process.env.UPS_CLIENT_ID,
+  upsClientSecret: process.env.UPS_CLIENT_SECRET,
+  upsShipperNumber: process.env.UPS_SHIPPER_NUMBER,
+  shipFromAddress: process.env.SHIP_FROM_ADDRESS,
+  upsBaseUrl: process.env.UPS_BASE_URL || "https://onlinetools.ups.com",
+  upsRateVersion: process.env.UPS_RATE_VERSION || "v2409",
+  upsPickupType: process.env.UPS_PICKUP_TYPE || "03",
+  upsCustomerClassification: process.env.UPS_CUSTOMER_CLASSIFICATION || "04",
+  upsPackagingType: process.env.UPS_PACKAGING_TYPE || "02",
+  upsPackageBillType: process.env.UPS_PACKAGE_BILL_TYPE || "03",
+  upsCompressionRatio: readNumberInRange(
+    process.env.UPS_COMPRESSION_RATIO,
+    0.8,
+    { min: 0.5, max: 1 }
+  ),
+  upsPackagePaddingInches: readNumberInRange(
+    process.env.UPS_PACKAGE_PADDING_INCHES,
+    0.5,
+    { min: 0, max: 4 }
+  ),
+  upsTimeoutMs: readPositiveInt(process.env.UPS_TIMEOUT_MS, 12000),
   commissionGcsBucket:
     process.env.COMMISSION_GCS_BUCKET || "soggy-commission-requests",
   commissionFromEmail:
