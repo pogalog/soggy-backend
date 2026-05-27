@@ -21,7 +21,7 @@ create table if not exists orders (
   channel                    text not null default 'online'
                              check (channel in ('online', 'market')),
   status                     text not null
-                             check (status in ('pending_payment', 'paid', 'canceled')),
+                             check (status in ('pending_payment', 'checkout_cancelled', 'paid', 'canceled')),
   currency                   text not null,
   subtotal_amount            integer not null check (subtotal_amount >= 0),
   tax_amount                 integer,
@@ -47,6 +47,13 @@ alter table if exists orders
 
 alter table if exists orders
   add column if not exists shipping_quote jsonb;
+
+alter table if exists orders
+  drop constraint if exists orders_status_check;
+
+alter table if exists orders
+  add constraint orders_status_check
+  check (status in ('pending_payment', 'checkout_cancelled', 'paid', 'canceled'));
 
 create table if not exists order_items (
   order_id         text not null references orders(id) on delete cascade,

@@ -5,7 +5,8 @@ const {
   cancelPendingOrder,
   getOrderById,
   getOrderRecordById,
-  getOrderRecordByStripeCheckoutSessionId
+  getOrderRecordByStripeCheckoutSessionId,
+  markOrderCheckoutCancelled
 } = require("../models/orderModel");
 
 function extractCheckoutShippingDetails(session) {
@@ -63,6 +64,23 @@ function extractCheckoutShippingDetails(session) {
   };
 }
 
+function extractCheckoutCustomerName(session) {
+  const candidates = [
+    session && session.customer_details && session.customer_details.name,
+    session && session.shipping_details && session.shipping_details.name,
+    session &&
+      session.collected_information &&
+      session.collected_information.shipping_details &&
+      session.collected_information.shipping_details.name
+  ];
+
+  const name = candidates.find(
+    (candidate) => typeof candidate === "string" && candidate.trim()
+  );
+
+  return name ? name.trim() : null;
+}
+
 function buildTaxSummary(session, order) {
   const breakdown =
     session &&
@@ -97,6 +115,14 @@ function resolveShippingMethod(session, order) {
     return order.shippingMethod.trim();
   }
 
+  const metadataMethod =
+    session && session.metadata && typeof session.metadata.shipping_method === "string"
+      ? session.metadata.shipping_method.trim()
+      : "";
+  if (metadataMethod === "market" || metadataMethod === "local_delivery") {
+    return metadataMethod;
+  }
+
   const shippingAmount = Number(
     session && session.total_details && session.total_details.amount_shipping
   );
@@ -118,11 +144,104 @@ function resolveShippingAmount(session, order) {
 }
 
 function resolveShippingDetails(session, order) {
+  const customerName = extractCheckoutCustomerName(session);
   if (order && order.shippingDetails && typeof order.shippingDetails === "object") {
-    return order.shippingDetails;
+    return withResolvedCustomerName(order.shippingDetails, customerName);
   }
 
-  return extractCheckoutShippingDetails(session);
+  const shippingMethod = resolveShippingMethod(session, order);
+  if (shippingMethod === "market") {
+    return extractMarketPickupDetails(session, customerName);
+  }
+
+  return withResolvedCustomerName(extractCheckoutShippingDetails(session), customerName);
+}
+
+function withResolvedCustomerName(shippingDetails, customerName) {
+  if (!shippingDetails || typeof shippingDetails !== "object") {
+    return shippingDetails;
+  }
+
+  if (
+    typeof shippingDetails.name === "string" &&
+    shippingDetails.name.trim()
+  ) {
+    return shippingDetails;
+  }
+
+  if (!customerName) {
+    return shippingDetails;
+  }
+
+  return {
+    ...shippingDetails,
+    name: customerName
+  };
+}
+
+function extractMarketPickupDetails(session, customerName) {
+  const metadata = session && session.metadata && typeof session.metadata === "object"
+    ? session.metadata
+    : {};
+  const startTime =
+    typeof metadata.market_pickup_start_time === "string" &&
+    metadata.market_pickup_start_time.trim()
+      ? metadata.market_pickup_start_time.trim()
+      : null;
+  const endTime =
+    typeof metadata.market_pickup_end_time === "string" &&
+    metadata.market_pickup_end_time.trim()
+      ? metadata.market_pickup_end_time.trim()
+      : null;
+  const marketTitle =
+    typeof metadata.market_pickup_title === "string" && metadata.market_pickup_title.trim()
+      ? metadata.market_pickup_title.trim()
+      : null;
+  const marketLink =
+    typeof metadata.market_pickup_link === "string" && metadata.market_pickup_link.trim()
+      ? metadata.market_pickup_link.trim()
+      : null;
+  const line1 =
+    typeof metadata.market_pickup_line1 === "string" && metadata.market_pickup_line1.trim()
+      ? metadata.market_pickup_line1.trim()
+      : null;
+  const city =
+    typeof metadata.market_pickup_city === "string" && metadata.market_pickup_city.trim()
+      ? metadata.market_pickup_city.trim()
+      : null;
+  const state =
+    typeof metadata.market_pickup_state === "string" && metadata.market_pickup_state.trim()
+      ? metadata.market_pickup_state.trim()
+      : null;
+  const country =
+    typeof metadata.market_pickup_country === "string" && metadata.market_pickup_country.trim()
+      ? metadata.market_pickup_country.trim()
+      : "US";
+  const postalCode =
+    typeof metadata.market_pickup_postal_code === "string" &&
+    metadata.market_pickup_postal_code.trim()
+      ? metadata.market_pickup_postal_code.trim()
+      : null;
+
+  if (!startTime || !line1 || !city || !state) {
+    return null;
+  }
+
+  return {
+    name: customerName,
+    address: {
+      line1,
+      line2: null,
+      city,
+      state,
+      postalCode,
+      country
+    },
+    start_time: startTime,
+    end_time: endTime,
+    market_title: marketTitle,
+    market_link: marketLink
+  };
 }
 
 function toOrderLookupResponse(order, session) {
@@ -251,15 +370,18 @@ function createOrderHandler({ getPool }) {
         const body = parseJsonBody(req);
         const action =
           body && typeof body.action === "string" ? body.action.trim().toLowerCase() : "";
-        if (action !== "cancel") {
+        if (action !== "cancel" && action !== "checkout_cancelled") {
           throw withStatusError("Unsupported order action", 400);
         }
 
-        const result = await cancelPendingOrder(pool, { orderId });
+        const result =
+          action === "cancel"
+            ? await cancelPendingOrder(pool, { orderId })
+            : await markOrderCheckoutCancelled(pool, { orderId });
         const order = await getOrderById(pool, orderId);
 
         return res.status(200).json({
-          action: "cancel",
+          action,
           changed: result.changed,
           order
         });
@@ -273,7 +395,7 @@ function createOrderHandler({ getPool }) {
       }
 
       const statusCode = typeof error.statusCode === "number" ? error.statusCode : 500;
-      console.error("Failed to fetch order", {
+      console.error("Failed to handle order request", {
         method: req.method,
         orderId,
         message: error.message

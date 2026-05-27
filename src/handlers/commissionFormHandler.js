@@ -73,6 +73,47 @@ function readOptionalString(value) {
   return normalized || null;
 }
 
+function normalizeYarnColors(value, fallbackColor, label) {
+  if (value === undefined || value === null) {
+    const normalizedFallback =
+      typeof fallbackColor === "string" ? fallbackColor.trim() : "";
+    if (!normalizedFallback) {
+      throw withStatusError(`${label} must include at least one color`, 400);
+    }
+
+    return [{ color: normalizedFallback, usage: "Primary color" }];
+  }
+
+  if (!Array.isArray(value)) {
+    throw withStatusError(`${label} must be an array`, 400);
+  }
+
+  const normalizedColors = value.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw withStatusError(`${label}[${index}] must be an object`, 400);
+    }
+
+    const color = readRequiredString(entry.color, `${label}[${index}].color`);
+    const usage =
+      typeof entry.usage === "string" && entry.usage.trim() ? entry.usage.trim() : "";
+
+    return {
+      color,
+      usage
+    };
+  });
+
+  if (normalizedColors.length === 0) {
+    throw withStatusError(`${label} must include at least one color`, 400);
+  }
+
+  return normalizedColors;
+}
+
+function summarizeYarnColors(yarnColors) {
+  return yarnColors.map((entry) => entry.color).join(", ");
+}
+
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
@@ -169,6 +210,8 @@ function normalizeLegacyFormPayload(body) {
     return null;
   }
 
+  const yarnColors = normalizeYarnColors(form.yarnColors, form.yarnColor, "form.yarnColors");
+
   return {
     submissionKey: readRequiredString(body.submissionKey, "submissionKey"),
     customer: {
@@ -182,7 +225,8 @@ function normalizeLegacyFormPayload(body) {
     },
     materials: {
       yarnType: readRequiredString(form.yarnType, "form.yarnType"),
-      yarnColor: readRequiredString(form.yarnColor, "form.yarnColor"),
+      yarnColor: summarizeYarnColors(yarnColors),
+      yarnColors,
       attachmentMaterialType: readRequiredString(
         form.attachmentMaterialType,
         "form.attachmentMaterialType"
@@ -221,6 +265,14 @@ function normalizeCommissionRequest(body) {
     throw withStatusError("materials is required", 400);
   }
 
+  const yarnColorFallback =
+    typeof materials.yarnColor === "string" ? materials.yarnColor : undefined;
+  const yarnColors = normalizeYarnColors(
+    materials.yarnColors,
+    yarnColorFallback,
+    "materials.yarnColors"
+  );
+
   const normalized = {
     submissionKey: readRequiredString(body.submissionKey, "submissionKey"),
     customer: {
@@ -234,7 +286,8 @@ function normalizeCommissionRequest(body) {
     },
     materials: {
       yarnType: readRequiredString(materials.yarnType, "materials.yarnType"),
-      yarnColor: readRequiredString(materials.yarnColor, "materials.yarnColor"),
+      yarnColor: summarizeYarnColors(yarnColors),
+      yarnColors,
       attachmentMaterialType: readRequiredString(
         materials.attachmentMaterialType,
         "materials.attachmentMaterialType"
@@ -276,6 +329,7 @@ function createCommissionFormHandler({ getPool }) {
         itemDescription: request.item.description,
         yarnType: request.materials.yarnType,
         yarnColor: request.materials.yarnColor,
+        yarnColors: request.materials.yarnColors,
         attachmentMaterialType: request.materials.attachmentMaterialType,
         storageBucket: env.commissionGcsBucket,
         uploadDirectory: request.storage.uploadDirectory,

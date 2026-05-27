@@ -8,6 +8,16 @@
     "itemDescription": "A medium-sized crochet dragon in mint green with cream accents, floppy wings, and a curled tail.",
     "yarnType": "chinille",
     "yarnColor": "#7ed6c2",
+    "yarnColors": [
+      {
+        "color": "#7ed6c2",
+        "usage": "Main body"
+      },
+      {
+        "color": "#fff4d6",
+        "usage": "Cream accents"
+      }
+    ],
     "attachmentMaterialType": "yarn-only"
   },
   "storage": {

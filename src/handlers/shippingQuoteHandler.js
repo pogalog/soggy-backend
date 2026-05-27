@@ -2,9 +2,10 @@
 
 const { getCartBySessionId } = require("../models/cartModel");
 const { getProductsForCheckoutByIds } = require("../models/productModel");
+const { resolveCartLineItems } = require("../lib/cartLineResolver");
 const {
   normalizeShippingDetailsInput,
-  quoteCheapestShipping
+  quoteShippingOptions
 } = require("../lib/shippingQuote");
 
 function withStatusError(message, statusCode) {
@@ -74,6 +75,29 @@ function methodNotAllowed(res) {
   return res.status(405).json({ error: "Method not allowed" });
 }
 
+function ensureResolvedCartLines(cartItems) {
+  const invalidItems = cartItems.filter((item) => typeof item.validationReason === "string");
+  if (invalidItems.length === 0) {
+    return;
+  }
+
+  const error = withStatusError(
+    invalidItems.some((item) => item.validationReason === "PRODUCT_NOT_FOUND")
+      ? "One or more cart products were not found"
+      : invalidItems.some((item) => item.validationReason === "VARIANT_SELECTION_REQUIRED")
+        ? "One or more cart items require a variant selection"
+        : "One or more cart items include an invalid variant selection",
+    422
+  );
+  error.details = invalidItems.map((item) => ({
+    lineId: item.lineId || undefined,
+    productId: item.productId,
+    variantId: item.variantId || undefined,
+    reason: item.validationReason
+  }));
+  throw error;
+}
+
 function createShippingQuoteHandler({ getPool }) {
   return async function shippingQuoteHandler(req, res) {
     let cartSessionId = null;
@@ -96,9 +120,11 @@ function createShippingQuoteHandler({ getPool }) {
 
       const productIds = cart.items.map((item) => item.productId);
       const productsById = await getProductsForCheckoutByIds(pool, productIds);
-      const quoteResult = await quoteCheapestShipping({
+      const { resolvedItems } = resolveCartLineItems(productsById, cart.items);
+      ensureResolvedCartLines(resolvedItems);
+      const quoteResult = await quoteShippingOptions({
         productsById,
-        cartItems: cart.items,
+        cartItems: resolvedItems,
         shippingDetails: normalized.shippingDetails
       });
 
@@ -109,7 +135,12 @@ function createShippingQuoteHandler({ getPool }) {
       }
 
       const statusCode = typeof error.statusCode === "number" ? error.statusCode : 500;
-      const publicMessage = statusCode >= 500 ? "Internal server error" : error.message;
+      const publicMessage =
+        statusCode === 502 || statusCode === 503 || statusCode === 504
+          ? "Shipping quote service is temporarily unavailable. Please retry in a moment."
+          : statusCode >= 500
+            ? "Internal server error"
+            : error.message;
       const responseBody = { error: publicMessage };
       if (statusCode < 500 && error.details !== undefined) {
         responseBody.details = error.details;
@@ -120,7 +151,9 @@ function createShippingQuoteHandler({ getPool }) {
           method: req.method,
           path: req.path || req.url,
           cartSessionId,
-          message: error.message
+          message: error.message,
+          cause: error.cause instanceof Error ? error.cause.message : undefined,
+          statusCode
         });
       } else {
         console.warn("Rejected shipping quote request", {

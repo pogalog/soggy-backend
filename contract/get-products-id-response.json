@@ -1,11 +1,27 @@
 {
   "id": "prod_123",
+  "slug": "moon-bunny-plush",
   "title": "Moon Bunny Plush",
-  "description": "…",
-  "price": { "amount": 4500, "currency": "USD", "display": "$45.00" },
+  "subtitle": "Soft plush bunny with embroidered moon details",
+  "description": "A handmade plush bunny with embroidered moon details and customizable colors.",
+  "status": "active",
+  "productKind": "repeatable",
+  "availabilityMode": "made_to_order",
   "kind": "product",
-  "daysToCreate": 0.5,
+  "price": {
+    "amount": 4500,
+    "currency": "USD",
+    "display": "$45.00",
+    "compareAtAmount": 5200,
+    "compareAtDisplay": "$52.00"
+  },
+  "daysToCreate": 1.5,
+  "leadTimeDays": {
+    "min": 1,
+    "max": 2
+  },
   "shipping": {
+    "weightOz": 20,
     "weightLbs": 1.25,
     "dimensionsIn": {
       "length": 10,
@@ -14,7 +30,118 @@
     },
     "isShippable": true
   },
-  "images": [{ "path": "products/prod_123/1.jpg", "alt": "Front view" }],
+  "safety": {
+    "id": "3",
+    "message": "This item may contain small parts and is not recommended for children 4 and under.",
+    "displayType": "embedded"
+  },
+  "images": [
+    {
+      "path": "products/prod_123/1.jpg",
+      "alt": "Front view"
+    }
+  ],
+  "categories": [
+    {
+      "id": "cat_wearables",
+      "slug": "wearables",
+      "name": "Wearables",
+      "isPrimary": true
+    },
+    {
+      "id": "cat_pride",
+      "slug": "pride",
+      "name": "Pride",
+      "isPrimary": false
+    }
+  ],
+  "tags": [
+    {
+      "id": "tag_plush",
+      "slug": "plush",
+      "name": "Plush"
+    }
+  ],
+  "attributes": [
+    {
+      "id": "attr_softness",
+      "code": "softness",
+      "name": "Softness",
+      "dataType": "enum",
+      "displayValue": "Extra Soft",
+      "valueText": null,
+      "valueNumber": null,
+      "valueBoolean": null,
+      "enumValue": {
+        "id": "attrv_softness_extra_soft",
+        "value": "Extra Soft"
+      }
+    }
+  ],
+  "options": [
+    {
+      "id": "opt_color",
+      "name": "Color",
+      "sortOrder": 0,
+      "values": [
+        {
+          "id": "optv_color_pink",
+          "value": "Pink",
+          "sortOrder": 0
+        },
+        {
+          "id": "optv_color_blue",
+          "value": "Blue",
+          "sortOrder": 1
+        }
+      ]
+    }
+  ],
+  "variants": [
+    {
+      "id": "var_pink",
+      "sku": "MOON-BUNNY-PINK",
+      "title": "Pink",
+      "inventoryQty": 2,
+      "sortOrder": 0,
+      "isDefault": true,
+      "isVisible": true,
+      "stripePriceId": "price_123",
+      "createdAt": "2026-02-05T21:15:00Z",
+      "updatedAt": "2026-02-05T21:15:00Z",
+      "optionSelections": [
+        {
+          "optionId": "opt_color",
+          "optionName": "Color",
+          "optionValueId": "optv_color_pink",
+          "value": "Pink"
+        }
+      ],
+      "optionValueIds": ["optv_color_pink"],
+      "priceDelta": {
+        "amount": 0,
+        "currency": "USD",
+        "display": "$0.00",
+        "signedDisplay": "$0.00"
+      },
+      "price": {
+        "amount": 4500,
+        "currency": "USD",
+        "display": "$45.00"
+      },
+      "shipping": {
+        "weightOz": 20,
+        "weightLbs": 1.25,
+        "dimensionsIn": {
+          "length": 10,
+          "width": 8,
+          "height": 4
+        },
+        "isShippable": true
+      }
+    }
+  ],
+  "hasVariants": true,
   "createdAt": "2026-02-05T21:15:00Z",
   "updatedAt": "2026-02-05T21:15:00Z"
 }

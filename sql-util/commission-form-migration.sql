@@ -39,6 +39,34 @@ alter table if exists commissions
   add column if not exists total_cost integer;
 
 alter table if exists commissions
+  add column if not exists yarn_colors jsonb not null default '[]'::jsonb;
+
+update commissions
+set yarn_colors = jsonb_build_array(
+  jsonb_build_object(
+    'color', yarn_color,
+    'usage', 'Primary color'
+  )
+)
+where yarn_colors = '[]'::jsonb
+  and yarn_color is not null
+  and btrim(yarn_color) <> '';
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conrelid = 'public.commissions'::regclass
+      and conname = 'commissions_yarn_colors_is_array'
+  ) then
+    alter table commissions
+      add constraint commissions_yarn_colors_is_array
+      check (jsonb_typeof(yarn_colors) = 'array');
+  end if;
+end $$;
+
+alter table if exists commissions
   alter column upload_directory drop not null;
 
 alter table if exists commissions

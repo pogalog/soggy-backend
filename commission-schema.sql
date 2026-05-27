@@ -6,6 +6,7 @@ create table if not exists commissions (
   item_description           text not null,
   yarn_type                  text not null,
   yarn_color                 text not null,
+  yarn_colors                jsonb not null default '[]'::jsonb,
   attachment_material_type   text not null,
   requires_commit            boolean not null default false,
   commitment_deposit_amount  integer,

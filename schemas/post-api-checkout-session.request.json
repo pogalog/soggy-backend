@@ -1,6 +1,7 @@
 {
   "cartSessionId": "sess_0a6f6f7c-66c2-4f9e-86bb-2d79f3bc1b62",
   "channel": "online",
+  "shippingMethod": "shipping",
   "shippingDetails": {
     "name": "Test Customer",
     "line1": "210 Peachtree St NW",
@@ -9,5 +10,6 @@
     "state": "GA",
     "postalCode": "30303",
     "country": "US"
-  }
+  },
+  "selectedShippingOptionId": "USPS:USPS_GROUND_ADVANTAGE"
 }
