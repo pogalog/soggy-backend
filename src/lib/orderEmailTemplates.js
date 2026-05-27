@@ -291,6 +291,10 @@ function deriveShippingMethod(order, shippingMethod, shippingAmount) {
   return deriveShippingAmount(order, shippingAmount) > 0 ? "Standard shipping" : "Not provided";
 }
 
+function isMarketPickupMethod(method) {
+  return typeof method === "string" && method.trim().toLowerCase() === "market";
+}
+
 function deriveShippingEstimate(order) {
   const quote = order && order.shippingQuote && typeof order.shippingQuote === "object"
     ? order.shippingQuote
@@ -314,6 +318,57 @@ function deriveShippingEstimate(order) {
   return new Intl.DateTimeFormat("en-US", {
     dateStyle: "medium"
   }).format(parsed);
+}
+
+function deriveShipByDate(order) {
+  const shipByDate =
+    order && typeof order.shipByDate === "string" && order.shipByDate.trim()
+      ? order.shipByDate.trim()
+      : "";
+
+  if (!shipByDate) {
+    return null;
+  }
+
+  const parsed = new Date(`${shipByDate.slice(0, 10)}T12:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    return shipByDate;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    dateStyle: "long",
+    timeZone: "UTC"
+  }).format(parsed);
+}
+
+function formatMarketDateTime(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value.trim();
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    dateStyle: "full",
+    timeStyle: "short"
+  }).format(parsed);
+}
+
+function formatMarketPickupRange(shippingDetails) {
+  if (!shippingDetails || typeof shippingDetails !== "object") {
+    return null;
+  }
+
+  const start = formatMarketDateTime(shippingDetails.start_time);
+  const end = formatMarketDateTime(shippingDetails.end_time);
+  if (!start) {
+    return null;
+  }
+
+  return end ? `${start} - ${end}` : start;
 }
 
 function buildTaxLabel(taxSummary) {
@@ -343,8 +398,12 @@ function buildCostBreakdownHtml({ order, shippingAmount, taxSummary }) {
   return buildTable([
     buildDetailRow("Items subtotal", formatMoney(itemSubtotal, currency)),
     buildDetailRow(
-      "Shipping",
-      resolvedShippingAmount > 0 ? formatMoney(resolvedShippingAmount, currency) : "Included"
+      isMarketPickupMethod(order && order.shippingMethod) ? "Market pickup" : "Shipping",
+      resolvedShippingAmount > 0
+        ? formatMoney(resolvedShippingAmount, currency)
+        : isMarketPickupMethod(order && order.shippingMethod)
+          ? "Free"
+          : "Included"
     ),
     buildDetailRow(buildTaxLabel(taxSummary), formatMoney(taxAmount, currency)),
     buildDetailRow("Grand total", formatMoney(order.totalAmount, currency))
@@ -368,18 +427,91 @@ function buildShippingAddressValue(shippingDetails) {
   return lines.map((line) => escapeHtml(line)).join("<br />");
 }
 
+function buildMarketPickupLocationValue(shippingDetails) {
+  if (!shippingDetails || !shippingDetails.address) {
+    return "Not available from the completed checkout session.";
+  }
+
+  const address = shippingDetails.address;
+  const lines = [
+    address.line1,
+    [address.city, address.state, address.postalCode].filter(Boolean).join(", "),
+    address.country
+  ].filter(Boolean);
+
+  return lines.map((line) => escapeHtml(line)).join("<br />");
+}
+
+function buildMarketDescriptionValue(shippingDetails) {
+  const parts = [];
+
+  if (
+    shippingDetails &&
+    typeof shippingDetails.market_description === "string" &&
+    shippingDetails.market_description.trim()
+  ) {
+    parts.push(escapeHtml(shippingDetails.market_description.trim()).replace(/\n/g, "<br />"));
+  }
+
+  if (
+    shippingDetails &&
+    typeof shippingDetails.market_link === "string" &&
+    shippingDetails.market_link.trim()
+  ) {
+    const link = escapeHtml(shippingDetails.market_link.trim());
+    parts.push(`<a href="${link}" style="color:${theme.goldSoft};text-decoration:underline;">${link}</a>`);
+  }
+
+  return parts.join("<br /><br />");
+}
+
 function buildShippingInfoTable({ shippingDetails, shippingMethod, shippingAmount, order }) {
   const currency = order && typeof order.currency === "string" ? order.currency : "USD";
+  const resolvedMethod = deriveShippingMethod(order, shippingMethod, shippingAmount);
+  const isMarketPickup = isMarketPickupMethod(resolvedMethod);
+  const shipByDate = deriveShipByDate(order);
   const rows = [
-    buildDetailRow("Shipping method", deriveShippingMethod(order, shippingMethod, shippingAmount)),
     buildDetailRow(
-      "Shipping cost",
-      formatMoney(deriveShippingAmount(order, shippingAmount), currency)
+      isMarketPickup ? "Pickup method" : "Shipping method",
+      resolvedMethod
     ),
+    buildDetailRow(
+      isMarketPickup ? "Pickup cost" : "Shipping cost",
+      deriveShippingAmount(order, shippingAmount) > 0
+        ? formatMoney(deriveShippingAmount(order, shippingAmount), currency)
+        : isMarketPickup
+          ? "Free"
+          : formatMoney(deriveShippingAmount(order, shippingAmount), currency)
+    ),
+    ...(shipByDate
+      ? [buildDetailRow("Estimated ship-by", shipByDate)]
+      : []),
     ...(deriveShippingEstimate(order)
       ? [buildDetailRow("Estimated delivery", deriveShippingEstimate(order))]
       : []),
-    buildDetailRowHtml("Shipping address", buildShippingAddressValue(shippingDetails))
+    ...(isMarketPickup &&
+    shippingDetails &&
+    typeof shippingDetails.market_title === "string" &&
+    shippingDetails.market_title.trim()
+      ? [buildDetailRow("Market", shippingDetails.market_title.trim())]
+      : []),
+    ...(isMarketPickup && formatMarketPickupRange(shippingDetails)
+      ? [buildDetailRow("Pickup time", formatMarketPickupRange(shippingDetails))]
+      : []),
+    buildDetailRowHtml(
+      isMarketPickup ? "Pickup location" : "Shipping address",
+      isMarketPickup
+        ? buildMarketPickupLocationValue(shippingDetails)
+        : buildShippingAddressValue(shippingDetails)
+    ),
+    ...(isMarketPickup && buildMarketDescriptionValue(shippingDetails)
+      ? [
+          buildDetailRowHtml(
+            "Market details",
+            buildMarketDescriptionValue(shippingDetails)
+          )
+        ]
+      : [])
   ];
 
   return buildTable(rows);
@@ -394,6 +526,7 @@ function buildOrderConfirmationCustomerEmail({
 }) {
   const companyName = escapeHtml(env.commissionCompanyName || "Soggy Stitches");
   const orderUrl = buildOrderUrl(order.id);
+  const shipByDate = deriveShipByDate(order);
 
   const bodyHtml = `
     <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">
@@ -402,6 +535,11 @@ function buildOrderConfirmationCustomerEmail({
     <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:16px;line-height:1.75;">
       We will begin work on it and notify you once it ships. If you need to check back on the order later, keep the order ID below handy.
     </p>
+    ${shipByDate ? `
+      <p style="margin:0 0 18px 0;padding:14px 16px;border-radius:16px;background:rgba(215,178,74,0.10);border:1px solid rgba(215,178,74,0.28);color:${theme.goldSoft};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.65;">
+        Estimated ship-by date: <strong>${escapeHtml(shipByDate)}</strong>
+      </p>
+    ` : ""}
     <div style="margin:0 0 22px 0;padding:18px 20px;border-radius:18px;background:
       linear-gradient(135deg, rgba(155,109,255,0.12) 0%, rgba(215,178,74,0.08) 100%),
       ${theme.mutedPanel};border:1px solid ${theme.panelBorder};">
@@ -426,7 +564,11 @@ function buildOrderConfirmationCustomerEmail({
     </div>
 
     <div style="margin-top:22px;">
-      ${buildSectionLabel("Shipping Information")}
+      ${buildSectionLabel(
+        isMarketPickupMethod(deriveShippingMethod(order, shippingMethod, shippingAmount))
+          ? "Pickup Information"
+          : "Shipping Information"
+      )}
       ${buildShippingInfoTable({ shippingDetails, shippingMethod, shippingAmount, order })}
     </div>
 
@@ -448,6 +590,81 @@ function buildOrderConfirmationCustomerEmail({
   };
 }
 
+function buildOrderConfirmationBusinessEmail({
+  order,
+  customerEmail,
+  shippingDetails,
+  shippingMethod,
+  shippingAmount,
+  taxSummary
+}) {
+  const companyName = escapeHtml(env.commissionCompanyName || "Soggy Stitches");
+  const orderUrl = buildOrderUrl(order.id);
+  const shipByDate = deriveShipByDate(order);
+
+  const bodyHtml = `
+    <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">
+      A paid order has been confirmed and scheduled into the production calendar.
+    </p>
+    ${shipByDate ? `
+      <p style="margin:0 0 18px 0;padding:14px 16px;border-radius:16px;background:rgba(215,178,74,0.10);border:1px solid rgba(215,178,74,0.28);color:${theme.goldSoft};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.65;">
+        Estimated ship-by date: <strong>${escapeHtml(shipByDate)}</strong>
+      </p>
+    ` : ""}
+    <div style="margin:0 0 22px 0;padding:18px 20px;border-radius:18px;background:
+      linear-gradient(135deg, rgba(155,109,255,0.12) 0%, rgba(215,178,74,0.08) 100%),
+      ${theme.mutedPanel};border:1px solid ${theme.panelBorder};">
+      ${buildSectionLabel("Order Snapshot")}
+      <div style="color:${theme.textPrimary};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.75;">
+        <strong style="color:${theme.goldSoft};">Order ID:</strong>
+        <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">${escapeHtml(
+          order.id
+        )}</span>
+      </div>
+      <div style="margin-top:8px;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.75;">
+        Customer email: ${escapeHtml(customerEmail || "Not available")}
+      </div>
+      <div style="margin-top:8px;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.75;">
+        Status: ${escapeHtml(order.status)}
+      </div>
+    </div>
+
+    ${buildSectionLabel("Items")}
+    ${buildOrderItemsHtml(order.items, order.currency)}
+
+    <div style="margin-top:22px;">
+      ${buildSectionLabel("Cost Breakdown")}
+      ${buildCostBreakdownHtml({ order, shippingAmount, taxSummary })}
+    </div>
+
+    <div style="margin-top:22px;">
+      ${buildSectionLabel(
+        isMarketPickupMethod(deriveShippingMethod(order, shippingMethod, shippingAmount))
+          ? "Pickup Information"
+          : "Shipping Information"
+      )}
+      ${buildShippingInfoTable({ shippingDetails, shippingMethod, shippingAmount, order })}
+    </div>
+
+    <div style="margin-top:22px;padding:20px;background:${theme.mutedPanel};border:1px solid ${theme.panelBorder};border-radius:18px;">
+      ${buildSectionLabel("Admin Follow-Up")}
+      <p style="margin:0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.75;">
+        Use the order page to review the customer-facing summary. Work scheduling details are available in the admin work queue.
+      </p>
+      ${buildActionButton("View Order", orderUrl)}
+    </div>
+  `;
+
+  return {
+    subject: `${companyName}: New paid order (${order.id})`,
+    html: buildEmailShell({
+      title: "New paid order",
+      bodyHtml
+    })
+  };
+}
+
 module.exports = {
+  buildOrderConfirmationBusinessEmail,
   buildOrderConfirmationCustomerEmail
 };

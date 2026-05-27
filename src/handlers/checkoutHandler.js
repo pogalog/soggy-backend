@@ -3,13 +3,19 @@
 const { env } = require("../config/env");
 const { getCartBySessionId } = require("../models/cartModel");
 const { getProductsForCheckoutByIds } = require("../models/productModel");
+const { buildDisplayName, resolveCartLineItems } = require("../lib/cartLineResolver");
+const { getUpcomingMarketByPickupDetails } = require("../models/marketModel");
 const {
   createPendingOrder,
   setOrderStripeCheckoutSessionId
 } = require("../models/orderModel");
 const {
+  attachReservationToCheckout,
+  reserveWorkForCart
+} = require("../models/workQueueModel");
+const {
   normalizeShippingDetailsInput,
-  quoteCheapestShipping
+  resolveSelectedShippingOption
 } = require("../lib/shippingQuote");
 const { getStripeClient } = require("../lib/stripeClient");
 
@@ -86,16 +92,125 @@ function normalizeCheckoutRequest(body) {
     throw withStatusError("channel must be either 'online' or 'market'", 400);
   }
 
-  const shippingDetails =
-    body.shippingDetails === undefined || body.shippingDetails === null
-      ? null
-      : normalizeShippingDetailsInput(body.shippingDetails, { requireName: false });
+  const rawShippingMethod =
+    typeof body.shippingMethod === "string" ? body.shippingMethod.trim() : "";
+  const shippingMethod =
+    rawShippingMethod || channel === "market"
+      ? rawShippingMethod || "market"
+      : "shipping";
+
+  if (
+    shippingMethod !== "shipping" &&
+    shippingMethod !== "market" &&
+    shippingMethod !== "local_delivery"
+  ) {
+    throw withStatusError(
+      "shippingMethod must be one of 'shipping', 'market', or 'local_delivery'",
+      400
+    );
+  }
+
+  let shippingDetails = null;
+  if (body.shippingDetails !== undefined && body.shippingDetails !== null) {
+    shippingDetails =
+      shippingMethod === "market"
+        ? normalizeMarketPickupDetailsInput(body.shippingDetails)
+        : normalizeShippingDetailsInput(body.shippingDetails, { requireName: false });
+  }
+  const selectedShippingOptionId =
+    typeof body.selectedShippingOptionId === "string"
+      ? body.selectedShippingOptionId.trim()
+      : "";
 
   return {
     cartSessionId,
     channel,
-    shippingDetails
+    shippingMethod,
+    shippingDetails,
+    selectedShippingOptionId: selectedShippingOptionId || null
   };
+}
+
+function normalizeMarketPickupDetailsInput(value) {
+  const raw = value && typeof value === "object" ? value : {};
+  const addressSource =
+    raw.address && typeof raw.address === "object" ? raw.address : raw;
+  const marketIdSource =
+    typeof raw.market_id === "string"
+      ? raw.market_id
+      : typeof raw.marketId === "string"
+        ? raw.marketId
+        : typeof raw.id === "string"
+          ? raw.id
+          : "";
+  const startTimeSource =
+    typeof raw.start_time === "string"
+      ? raw.start_time
+      : typeof raw.startTime === "string"
+        ? raw.startTime
+        : "";
+
+  const normalized = {
+    market_id: marketIdSource.trim(),
+    name:
+      typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : null,
+    address: {
+      line1:
+        typeof addressSource.line1 === "string" && addressSource.line1.trim()
+          ? addressSource.line1.trim()
+          : "",
+      line2:
+        typeof addressSource.line2 === "string" && addressSource.line2.trim()
+          ? addressSource.line2.trim()
+          : null,
+      city:
+        typeof addressSource.city === "string" && addressSource.city.trim()
+          ? addressSource.city.trim()
+          : "",
+      state:
+        typeof addressSource.state === "string" && addressSource.state.trim()
+          ? addressSource.state.trim().toUpperCase()
+          : "",
+      postalCode:
+        typeof addressSource.postalCode === "string" && addressSource.postalCode.trim()
+          ? addressSource.postalCode.trim()
+          : null,
+      country:
+        typeof addressSource.country === "string" && addressSource.country.trim()
+          ? addressSource.country.trim().toUpperCase()
+          : "US"
+    },
+    start_time: typeof startTimeSource === "string" ? startTimeSource.trim() : ""
+  };
+
+  const missingField = normalized.market_id
+    ? [
+        ["country", normalized.address.country]
+      ].find((entry) => !entry[1])
+    : [
+        ["line1", normalized.address.line1],
+        ["city", normalized.address.city],
+        ["state", normalized.address.state],
+        ["country", normalized.address.country],
+        ["start_time", normalized.start_time]
+      ].find((entry) => !entry[1]);
+
+  if (missingField) {
+    throw withStatusError(
+      missingField[0] === "start_time"
+        ? "shippingDetails.start_time is required"
+        : `shippingDetails.address.${missingField[0]} is required`,
+      400
+    );
+  }
+
+  const parsedStartTime = normalized.start_time ? new Date(normalized.start_time) : null;
+  if (parsedStartTime && Number.isNaN(parsedStartTime.getTime())) {
+    throw withStatusError("shippingDetails.start_time must be a valid ISO datetime", 400);
+  }
+
+  normalized.start_time = parsedStartTime ? parsedStartTime.toISOString() : "";
+  return normalized;
 }
 
 function getAllowedShippingCountries() {
@@ -118,36 +233,60 @@ function getAllowedShippingCountries() {
 function buildPreparedOrderItems({ cartItems, productsById }) {
   const preparedItems = [];
   const missing = [];
+  const invalidVariants = [];
   const workLimitViolations = [];
   let totalWorkDays = 0;
+  const { resolvedItems } = resolveCartLineItems(productsById, cartItems);
 
-  for (const cartItem of cartItems) {
+  for (const cartItem of resolvedItems) {
     const product = productsById.get(cartItem.productId);
     if (!product) {
       missing.push(cartItem.productId);
       continue;
     }
 
+    if (cartItem.validationReason) {
+      invalidVariants.push({
+        lineId: cartItem.lineId || undefined,
+        productId: cartItem.productId,
+        variantId: cartItem.variantId || undefined,
+        reason: cartItem.validationReason
+      });
+      continue;
+    }
+
     if (product.kind === "commission_commitment" && cartItem.quantity > 1) {
       workLimitViolations.push({
+        lineId: cartItem.lineId || undefined,
         productId: cartItem.productId,
+        variantId: cartItem.variantId || undefined,
         requestedQuantity: cartItem.quantity,
         maxCartQty: 1,
         reason: "EXCEEDS_MAX_CART_QTY"
       });
     }
 
+    const workUnits =
+      product.kind === "commission_commitment"
+        ? 0
+        : Number(product.daysToCreate || 0) * cartItem.quantity;
+
     if (product.kind !== "commission_commitment") {
-      totalWorkDays += Number(product.daysToCreate || 0) * cartItem.quantity;
+      totalWorkDays += workUnits;
     }
 
     preparedItems.push({
+      lineId: cartItem.lineId || null,
       productId: product.id,
-      sku: product.id,
-      name: product.title,
-      unitAmount: product.sellPriceCents,
+      variantId: cartItem.variantId || null,
+      variantLabel: cartItem.variantLabel || null,
+      optionSummary: cartItem.optionSummary || null,
+      sku: cartItem.sku || product.id,
+      name: buildDisplayName(cartItem),
+      unitAmount: Number(cartItem.unitAmount || 0),
       quantity: cartItem.quantity,
-      stripeThumbUrl: product.stripeThumbUrl
+      stripeThumbUrl: product.stripeThumbUrl,
+      workUnits
     });
   }
 
@@ -157,15 +296,32 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
     throw error;
   }
 
+  if (invalidVariants.length > 0) {
+    const error = withStatusError(
+      invalidVariants.some((item) => item.reason === "VARIANT_SELECTION_REQUIRED")
+        ? "One or more cart items require a variant selection"
+        : "One or more cart items include an invalid variant selection",
+      422
+    );
+    error.details = invalidVariants;
+    throw error;
+  }
+
   if (totalWorkDays > env.maxCartWorkDays) {
-    for (const item of preparedItems) {
+    for (const item of resolvedItems) {
+      if (item.validationReason) {
+        continue;
+      }
+
       const product = productsById.get(item.productId);
       if (!product || product.kind === "commission_commitment") {
         continue;
       }
 
       workLimitViolations.push({
+        lineId: item.lineId || undefined,
         productId: item.productId,
+        variantId: item.variantId || undefined,
         requestedQuantity: item.quantity,
         requestedWorkDays: Number(product.daysToCreate || 0) * item.quantity,
         totalRequestedWorkDays: totalWorkDays,
@@ -190,13 +346,6 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
   }
 
   return preparedItems;
-}
-
-function cartRequiresShipping(cartItems, productsById) {
-  return cartItems.some((item) => {
-    const product = productsById.get(item.productId);
-    return product && product.kind !== "commission_commitment";
-  });
 }
 
 function validateShippingDetailsForCheckout(shippingDetails) {
@@ -230,7 +379,10 @@ function buildStripeLineItems(items) {
       name: item.name,
       metadata: {
         product_id: String(item.productId),
-        sku: String(item.sku)
+        sku: String(item.sku),
+        variant_id: item.variantId ? String(item.variantId) : "",
+        variant_label: item.variantLabel ? String(item.variantLabel) : "",
+        option_summary: item.optionSummary ? String(item.optionSummary) : ""
       }
     };
 
@@ -267,6 +419,8 @@ function buildStripeShippingOptions(quote) {
     metadata: {
       carrier: quote.carrier || "UPS",
       service_code: quote.serviceCode || "",
+      mail_class: quote.mailClass || "",
+      option_id: quote.optionId || "",
       quoted_at: quote.quotedAt || ""
     }
   };
@@ -324,6 +478,82 @@ async function createStripeCustomer(stripe, shippingDetails) {
   return customer && typeof customer.id === "string" ? customer.id : null;
 }
 
+async function validateMarketPickupDetails(pool, shippingDetails) {
+  if (
+    !shippingDetails ||
+    !shippingDetails.address ||
+    (!shippingDetails.market_id && !shippingDetails.start_time)
+  ) {
+    throw withStatusError("shippingDetails are required for market pickup", 400);
+  }
+
+  const market = await getUpcomingMarketByPickupDetails(pool, {
+    marketId: shippingDetails.market_id,
+    streetAddress: shippingDetails.address.line1,
+    city: shippingDetails.address.city,
+    state: shippingDetails.address.state,
+    startTime: shippingDetails.start_time
+  });
+
+  if (!market) {
+    throw withStatusError(
+      "The selected market pickup event is no longer available. Please refresh checkout and choose another market.",
+      422
+    );
+  }
+
+  return {
+    ...shippingDetails,
+    market_id: market.marketId || shippingDetails.market_id || null,
+    market_title: market.title || null,
+    market_description: market.description || null,
+    market_link: market.link || null,
+    address: {
+      line1: market.streetAddress || market.address || shippingDetails.address.line1,
+      line2: shippingDetails.address.line2 || null,
+      city: market.city || shippingDetails.address.city,
+      state: market.state || shippingDetails.address.state,
+      postalCode: shippingDetails.address.postalCode || null,
+      country: shippingDetails.address.country || "US"
+    },
+    start_time: market.startTime || market.start,
+    end_time: market.endTime || null
+  };
+}
+
+function buildCheckoutMetadata({
+  cartSessionId,
+  channel,
+  orderId,
+  shippingMethod,
+  shippingDetails,
+  workReservation
+}) {
+  const metadata = {
+    cart_session_id: cartSessionId,
+    channel,
+    order_id: orderId,
+    shipping_method: shippingMethod,
+    work_reservation_id: workReservation ? workReservation.id : "",
+    ship_by_date: workReservation ? workReservation.shipByDate || "" : ""
+  };
+
+  if (shippingMethod === "market" && shippingDetails && shippingDetails.address) {
+    metadata.market_pickup_market_id = shippingDetails.market_id || "";
+    metadata.market_pickup_title = shippingDetails.market_title || "";
+    metadata.market_pickup_start_time = shippingDetails.start_time || "";
+    metadata.market_pickup_end_time = shippingDetails.end_time || "";
+    metadata.market_pickup_line1 = shippingDetails.address.line1 || "";
+    metadata.market_pickup_city = shippingDetails.address.city || "";
+    metadata.market_pickup_state = shippingDetails.address.state || "";
+    metadata.market_pickup_postal_code = shippingDetails.address.postalCode || "";
+    metadata.market_pickup_country = shippingDetails.address.country || "US";
+    metadata.market_pickup_link = shippingDetails.market_link || "";
+  }
+
+  return metadata;
+}
+
 function methodNotAllowed(res) {
   res.set("Allow", "POST");
   return res.status(405).json({ error: "Method not allowed" });
@@ -351,41 +581,70 @@ function createCheckoutHandler({ getPool }) {
 
       const productIds = cart.items.map((item) => item.productId);
       const productsById = await getProductsForCheckoutByIds(pool, productIds);
+      const { resolvedItems: resolvedCartItems } = resolveCartLineItems(productsById, cart.items);
       const preparedItems = buildPreparedOrderItems({
         cartItems: cart.items,
         productsById
       });
 
+      if (normalized.shippingMethod === "local_delivery") {
+        throw withStatusError("Local delivery checkout is not available yet", 422);
+      }
+
       const requiresShipping =
-        normalized.channel === "online" && cartRequiresShipping(cart.items, productsById);
+        normalized.shippingMethod === "shipping" &&
+        normalized.channel === "online" &&
+        resolvedCartItems.some(
+          (item) => !item.validationReason && item.kind && item.kind !== "commission_commitment"
+        );
       let shippingQuote = null;
       let shippingDetails = null;
 
       if (requiresShipping) {
         validateShippingDetailsForCheckout(normalized.shippingDetails);
+        if (!normalized.selectedShippingOptionId) {
+          throw withStatusError("selectedShippingOptionId is required", 400);
+        }
+
         shippingDetails = normalized.shippingDetails;
-        const quoteResult = await quoteCheapestShipping({
+        const quoteResult = await resolveSelectedShippingOption({
           productsById,
-          cartItems: cart.items,
-          shippingDetails
+          cartItems: resolvedCartItems,
+          shippingDetails,
+          selectedOptionId: normalized.selectedShippingOptionId
         });
-        shippingQuote = quoteResult.quote;
+        shippingQuote = quoteResult.selectedOption;
+      } else if (normalized.shippingMethod === "market") {
+        shippingDetails = await validateMarketPickupDetails(pool, normalized.shippingDetails);
       }
+
+      const workReservation = await reserveWorkForCart(pool, {
+        cartSessionId,
+        items: preparedItems
+      });
 
       const pendingOrder = await createPendingOrder(pool, {
         cartSessionId,
         channel: normalized.channel,
         currency: String(env.priceCurrency || "USD").toUpperCase(),
         items: preparedItems,
-        shippingMethod: shippingQuote ? shippingQuote.serviceName : null,
-        shippingAmount: shippingQuote ? shippingQuote.amountCents : null,
+        shippingMethod:
+          normalized.shippingMethod === "market"
+            ? "market"
+            : shippingQuote
+              ? shippingQuote.serviceName
+              : null,
+        shippingAmount: normalized.shippingMethod === "market" ? 0 : shippingQuote ? shippingQuote.amountCents : null,
         shippingDetails,
-        shippingQuote
+        shippingQuote,
+        shipByDate: workReservation ? workReservation.shipByDate : null
       });
 
       const appBaseUrl = requireAppBaseUrl();
       const stripe = getStripeClient();
-      const customerId = await createStripeCustomer(stripe, shippingDetails);
+      const customerId = requiresShipping
+        ? await createStripeCustomer(stripe, shippingDetails)
+        : null;
       const sessionPayload = {
         mode: "payment",
         line_items: buildStripeLineItems(preparedItems),
@@ -394,13 +653,18 @@ function createCheckoutHandler({ getPool }) {
         success_url: `${appBaseUrl}/checkout/success?order_id=${encodeURIComponent(
           pendingOrder.id
         )}&session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${appBaseUrl}/checkout`,
+        cancel_url: `${appBaseUrl}/checkout?cancelled_order_id=${encodeURIComponent(
+          pendingOrder.id
+        )}`,
         client_reference_id: cartSessionId,
-        metadata: {
-          cart_session_id: cartSessionId,
+        metadata: buildCheckoutMetadata({
+          cartSessionId,
           channel: normalized.channel,
-          order_id: pendingOrder.id
-        }
+          orderId: pendingOrder.id,
+          shippingMethod: normalized.shippingMethod,
+          shippingDetails,
+          workReservation
+        })
       };
 
       if (customerId) {
@@ -424,9 +688,19 @@ function createCheckoutHandler({ getPool }) {
         stripeCheckoutSessionId: session.id
       });
 
+      if (workReservation) {
+        await attachReservationToCheckout(pool, {
+          reservationId: workReservation.id,
+          cartSessionId,
+          orderId: pendingOrder.id,
+          stripeCheckoutSessionId: session.id
+        });
+      }
+
       return res.status(201).json({
         checkoutUrl: session.url,
-        orderId: pendingOrder.id
+        orderId: pendingOrder.id,
+        workReservation
       });
     } catch (error) {
       if (error instanceof SyntaxError || error.type === "entity.parse.failed") {

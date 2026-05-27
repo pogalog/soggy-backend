@@ -9,17 +9,52 @@
     },
     "totalUnits": 1
   },
+  "options": [
+    {
+      "optionId": "UPS:03",
+      "carrier": "UPS",
+      "serviceCode": "03",
+      "mailClass": null,
+      "serviceName": "UPS Ground",
+      "amountCents": 1412,
+      "currency": "USD",
+      "amountDisplay": "$14.12",
+      "businessDaysInTransit": 1,
+      "estimatedDeliveryDate": "2026-03-25",
+      "estimatedDeliveryTime": "230000",
+      "negotiated": true,
+      "quotedAt": "2026-03-24T16:32:00.000Z"
+    },
+    {
+      "optionId": "USPS:USPS_GROUND_ADVANTAGE",
+      "carrier": "USPS",
+      "serviceCode": "USPS_GROUND_ADVANTAGE",
+      "mailClass": "USPS_GROUND_ADVANTAGE",
+      "serviceName": "USPS Ground Advantage",
+      "amountCents": 705,
+      "currency": "USD",
+      "amountDisplay": "$7.05",
+      "businessDaysInTransit": 2,
+      "estimatedDeliveryDate": "2026-03-26",
+      "estimatedDeliveryTime": null,
+      "negotiated": false,
+      "quotedAt": "2026-03-24T16:32:00.000Z"
+    }
+  ],
+  "defaultOptionId": "USPS:USPS_GROUND_ADVANTAGE",
   "quote": {
-    "carrier": "UPS",
-    "serviceCode": "03",
-    "serviceName": "UPS Ground",
-    "amountCents": 1412,
+    "optionId": "USPS:USPS_GROUND_ADVANTAGE",
+    "carrier": "USPS",
+    "serviceCode": "USPS_GROUND_ADVANTAGE",
+    "mailClass": "USPS_GROUND_ADVANTAGE",
+    "serviceName": "USPS Ground Advantage",
+    "amountCents": 705,
     "currency": "USD",
-    "amountDisplay": "$14.12",
-    "businessDaysInTransit": 1,
-    "estimatedDeliveryDate": "20260325",
-    "estimatedDeliveryTime": "230000",
-    "negotiated": true,
+    "amountDisplay": "$7.05",
+    "businessDaysInTransit": 2,
+    "estimatedDeliveryDate": "2026-03-26",
+    "estimatedDeliveryTime": null,
+    "negotiated": false,
     "quotedAt": "2026-03-24T16:32:00.000Z"
   }
 }

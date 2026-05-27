@@ -59,6 +59,7 @@ function mapCommissionResponse(commission) {
     item_description: commission.item_description,
     yarn_type: commission.yarn_type,
     yarn_color: commission.yarn_color,
+    yarn_colors: Array.isArray(commission.yarn_colors) ? commission.yarn_colors : [],
     attachment_material_type: commission.attachment_material_type,
     status: commission.status,
     time_cost: commission.time_cost,

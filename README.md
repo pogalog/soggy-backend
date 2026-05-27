@@ -32,7 +32,9 @@ Success response shape matches `contract/get-products-id-response.json`.
 - `GET /markets`
 - `GET /api/markets`
 
-Returns all rows from the `markets` table ordered by `start_time` ascending.
+Returns all rows from the `markets` table ordered by `start_time` ascending. Each
+row includes the stable `market_id` as both `id` and `marketId`, plus the legacy
+display fields.
 
 ## Cart endpoints
 
@@ -78,6 +80,20 @@ Request body:
 }
 ```
 
+Market pickup request body:
+
+```json
+{
+  "cartSessionId": "sess_123",
+  "channel": "online",
+  "shippingMethod": "market",
+  "shippingDetails": {
+    "market_id": "soggy_spring_craft_market_20260516t140000z",
+    "name": "Test Customer"
+  }
+}
+```
+
 Behavior notes:
 
 - Reads cart items and product pricing from Postgres (client prices are ignored).
@@ -89,6 +105,9 @@ Behavior notes:
 - Enables Stripe automatic tax and applies optional `STRIPE_TAX_CODE` to each merchandise line item.
 - Attempts to attach the first image found under `STRIPE_THUMBNAILS_GCS_BUCKET/<product_id>/` as the Stripe Checkout product image.
 - Returns both `checkoutUrl` and `orderId`.
+- Market pickup checkout validates the selected event by `shippingDetails.market_id`
+  when present. Legacy address + `start_time` validation remains supported during
+  the UI rollout.
 
 ## Shipping quote endpoint
 
@@ -116,7 +135,7 @@ Behavior notes:
 - Reads cart items and product shipping dimensions/weight from Postgres.
 - Packs the cart into a single estimated shipment using a soft-goods compression heuristic.
 - Calls the UPS OAuth token endpoint with `UPS_CLIENT_ID` + `UPS_CLIENT_SECRET`.
-- Calls the UPS Rating `Shop` endpoint with negotiated-rate lookup enabled and returns only the cheapest valid option.
+- Calls the UPS Rating `Shop` endpoint and returns only the cheapest valid option.
 - Returns `shippingRequired: false` when the cart only contains non-shippable commission commitment items.
 
 ## Order lookup endpoint
@@ -240,24 +259,70 @@ cp .env.example .env
 
 Only `.env` is loaded at runtime. `.env.example` is just a template and is not read by the app.
 
-3. Apply DB schema updates (once per database):
+For the local Docker-backed flow used with the main site in `~/soggy-stitches`, set the DB connection in `.env` to TCP and point checkout redirects at the frontend:
+
+```dotenv
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_USER=postgres
+DB_PASS=woofins
+DB_NAME=postgres
+APP_BASE_URL=http://localhost:3000
+```
+
+If you only run the backend by itself, `APP_BASE_URL=http://localhost:8080` is fine. Checkout, shipping, Stripe webhook, UPS, and SMTP env vars are only needed for those corresponding endpoints.
+
+3. Start Postgres locally (fresh local setup):
+
+```bash
+docker volume create soggy-postgres-dev-data
+docker run -d \
+  --name soggy-postgres-dev \
+  -e POSTGRES_PASSWORD=woofins \
+  -e POSTGRES_DB=postgres \
+  -p 5432:5432 \
+  -v soggy-postgres-dev-data:/var/lib/postgresql/data \
+  postgres:16
+```
+
+Set a shell-local `DATABASE_URL` for `psql`:
+
+```bash
+export DATABASE_URL=postgresql://postgres:woofins@127.0.0.1:5432/postgres
+```
+
+4. Load the schema.
+
+Fresh local catalog database:
 
 ```bash
 psql "$DATABASE_URL" -f product-schema.sql
 psql "$DATABASE_URL" -f cart-schema.sql
 psql "$DATABASE_URL" -f commission-schema.sql
 psql "$DATABASE_URL" -f order-schema.sql
+psql "$DATABASE_URL" -f sql-util/product-inserts.sql
+psql "$DATABASE_URL" -f sql-util/catalog-schema-migration.sql
+psql "$DATABASE_URL" -f sql-util/catalog-dev-seed.sql
 ```
 
-If you already have an older DB, apply the incremental script instead:
+Existing database upgrade path:
 
 ```bash
 psql "$DATABASE_URL" -f sql-util/commission-form-migration.sql
 psql "$DATABASE_URL" -f sql-util/stripe-checkout-migration.sql
 psql "$DATABASE_URL" -f sql-util/ups-shipping-migration.sql
+psql "$DATABASE_URL" -f sql-util/catalog-schema-migration.sql
 ```
 
-4. Run locally:
+If your database already has checkout orders and you only need the new canceled-checkout status:
+
+```bash
+psql "$DATABASE_URL" -f sql-util/checkout-cancelled-status-migration.sql
+```
+
+`sql-util/catalog-dev-seed.sql` is optional, but it is the quickest way to get local category/tag/attribute/variant data for the updated product pages.
+
+5. Run locally:
 
 ```bash
 npm start
@@ -267,10 +332,28 @@ This serves both `/products/...` and `/cart/...` from the same local process.
 
 `npm run dev:debug` is available if you explicitly want framework debug behavior during local troubleshooting.
 
-5. Example request:
+6. If you are also running the main site from `~/soggy-stitches`, point it at this backend:
 
 ```bash
-curl "http://localhost:8080/products/prod_123"
+cd ~/soggy-stitches
+PRODUCTS_API_BASE_URL=http://localhost:8080 npm run dev
+```
+
+The frontend local product pages should then load from this backend at `http://localhost:3000`.
+
+7. Example requests:
+
+```bash
+curl "http://localhost:8080/?id=prod_123"
+curl "http://localhost:8080/api/products/moon-bunny-plush"
+```
+
+Optional cleanup:
+
+```bash
+docker stop soggy-postgres-dev
+docker rm -f soggy-postgres-dev
+docker volume rm soggy-postgres-dev-data
 ```
 
 ## Deploy to Cloud Functions (Gen 2)

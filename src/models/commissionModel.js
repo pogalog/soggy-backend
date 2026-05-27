@@ -24,6 +24,34 @@ function normalizeBoolean(value) {
   return false;
 }
 
+function normalizeYarnColors(value, fallbackColor) {
+  const colors = Array.isArray(value) ? value : [];
+  const normalizedColors = colors
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const color = typeof entry.color === "string" ? entry.color.trim() : "";
+      if (!color) {
+        return null;
+      }
+
+      return {
+        color,
+        usage: typeof entry.usage === "string" ? entry.usage.trim() : ""
+      };
+    })
+    .filter(Boolean);
+
+  if (normalizedColors.length > 0) {
+    return normalizedColors;
+  }
+
+  const normalizedFallback = typeof fallbackColor === "string" ? fallbackColor.trim() : "";
+  return normalizedFallback ? [{ color: normalizedFallback, usage: "Primary color" }] : [];
+}
+
 async function getCommissionBySubmissionKey(pool, submissionKey) {
   const result = await pool.query(
     `
@@ -55,6 +83,7 @@ async function createOrGetCommission(
     itemDescription,
     yarnType,
     yarnColor,
+    yarnColors,
     attachmentMaterialType,
     storageBucket,
     uploadDirectory,
@@ -85,6 +114,7 @@ async function createOrGetCommission(
           item_description,
           yarn_type,
           yarn_color,
+          yarn_colors,
           attachment_material_type,
           storage_bucket,
           upload_directory,
@@ -97,7 +127,7 @@ async function createOrGetCommission(
           updated_at
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13, $14, NOW(), NOW()
+          $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, NOW(), NOW()
         )
         RETURNING id, status, created_at, updated_at
       `,
@@ -108,6 +138,7 @@ async function createOrGetCommission(
         itemDescription,
         yarnType,
         yarnColor,
+        JSON.stringify(normalizeYarnColors(yarnColors, yarnColor)),
         attachmentMaterialType,
         storageBucket,
         uploadDirectory || null,
@@ -200,6 +231,7 @@ async function getCommissionForFollowUp(pool, commissionId) {
         item_description,
         yarn_type,
         yarn_color,
+        yarn_colors,
         attachment_material_type,
         status,
         requires_commit,
@@ -228,6 +260,7 @@ async function getCommissionForFollowUp(pool, commissionId) {
     itemDescription: row.item_description,
     yarnType: row.yarn_type,
     yarnColor: row.yarn_color,
+    yarnColors: normalizeYarnColors(row.yarn_colors, row.yarn_color),
     attachmentMaterialType: row.attachment_material_type,
     status: row.status,
     requiresCommit: normalizeBoolean(row.requires_commit),
@@ -262,6 +295,7 @@ async function getCommissionById(pool, commissionId) {
         item_description,
         yarn_type,
         yarn_color,
+        yarn_colors,
         attachment_material_type,
         status,
         time_cost,

@@ -56,7 +56,9 @@ async function fetchWithTimeout(url, init, timeoutMs) {
       throw withStatusError("UPS request timed out", 504);
     }
 
-    throw error;
+    const wrappedError = withStatusError("UPS request failed", 502);
+    wrappedError.cause = error;
+    throw wrappedError;
   } finally {
     clearTimeout(timeoutId);
   }

@@ -3,6 +3,10 @@
 const { randomUUID } = require("node:crypto");
 const { env } = require("../config/env");
 const { requestUpsShopRates } = require("./upsClient");
+const {
+  requestUspsBaseRate,
+  requestUspsServiceStandards
+} = require("./uspsClient");
 
 const UPS_SERVICE_NAME_BY_CODE = {
   "01": "UPS Next Day Air",
@@ -12,6 +16,27 @@ const UPS_SERVICE_NAME_BY_CODE = {
   "13": "UPS Next Day Air Saver",
   "14": "UPS Next Day Air Early",
   "59": "UPS 2nd Day Air A.M."
+};
+
+const USPS_SERVICE_NAME_BY_MAIL_CLASS = {
+  BOUND_PRINTED_MATTER: "Bound Printed Matter",
+  "FIRST-CLASS_PACKAGE_RETURN_SERVICE": "First-Class Package Return Service",
+  "FIRST-CLASS_PACKAGE_SERVICE": "First-Class Package Service",
+  GROUND_RETURN_SERVICE: "Ground Return Service",
+  LIBRARY_MAIL: "Library Mail",
+  MEDIA_MAIL: "Media Mail",
+  PARCEL_SELECT: "Parcel Select",
+  PARCEL_SELECT_LIGHTWEIGHT: "Parcel Select Lightweight",
+  PRIORITY_MAIL: "Priority Mail",
+  PRIORITY_MAIL_EXPRESS: "Priority Mail Express",
+  PRIORITY_MAIL_EXPRESS_RETURN_SERVICE: "Priority Mail Express Return Service",
+  PRIORITY_MAIL_RETURN_SERVICE: "Priority Mail Return Service",
+  USPS_CONNECT_LOCAL: "USPS Connect Local",
+  USPS_CONNECT_MAIL: "USPS Connect Mail",
+  USPS_CONNECT_REGIONAL: "USPS Connect Regional",
+  USPS_GROUND_ADVANTAGE: "USPS Ground Advantage",
+  USPS_GROUND_ADVANTAGE_RETURN_SERVICE: "USPS Ground Advantage Return Service",
+  USPS_RETAIL_GROUND: "USPS Retail Ground"
 };
 
 function withStatusError(message, statusCode) {
@@ -72,7 +97,7 @@ function normalizeShippingDetailsInput(value, options = {}) {
   }
 
   if (normalized.address.country !== "US") {
-    throw withStatusError("UPS checkout quotes currently support US destinations only", 422);
+    throw withStatusError("Shipping quotes currently support US destinations only", 422);
   }
 
   return normalized;
@@ -165,11 +190,16 @@ function buildPackageSummary(productsById, cartItems) {
 
   for (const cartItem of cartItems) {
     const product = productsById.get(cartItem.productId);
-    if (!product || isCommissionProduct(product)) {
+    const productKind = cartItem.kind || product?.kind || null;
+    if (!product || productKind === "commission_commitment") {
       continue;
     }
 
-    const shipping = product.shipping || null;
+    const shipping = cartItem.shipping || product.shipping || null;
+    const missingShippingId =
+      cartItem.variantId && typeof cartItem.variantId === "string"
+        ? `${cartItem.productId}:${cartItem.variantId}`
+        : cartItem.productId;
     if (
       !shipping ||
       !toPositiveNumber(shipping.weightLbs) ||
@@ -178,7 +208,7 @@ function buildPackageSummary(productsById, cartItems) {
       !toPositiveNumber(shipping.dimensionsIn.width) ||
       !toPositiveNumber(shipping.dimensionsIn.height)
     ) {
-      missingShippingData.push(product.id);
+      missingShippingData.push(missingShippingId);
       continue;
     }
 
@@ -190,7 +220,7 @@ function buildPackageSummary(productsById, cartItems) {
 
     for (let index = 0; index < cartItem.quantity; index += 1) {
       shippableUnits.push({
-        productId: product.id,
+        productId: missingShippingId,
         weightLbs: Number(shipping.weightLbs),
         lengthIn: sortedDimensions[0],
         widthIn: sortedDimensions[1],
@@ -322,6 +352,20 @@ function resolvePickupSchedule() {
   };
 }
 
+function resolveMailingDate() {
+  const pickup = resolvePickupSchedule();
+  return `${pickup.date.slice(0, 4)}-${pickup.date.slice(4, 6)}-${pickup.date.slice(6, 8)}`;
+}
+
+function requireZip5(postalCode, label) {
+  const digits = String(postalCode || "").replace(/\D/g, "");
+  if (digits.length < 5) {
+    throw withStatusError(`${label} must include a valid 5-digit US ZIP code`, 422);
+  }
+
+  return digits.slice(0, 5);
+}
+
 function buildRateRequest({ shipFrom, shippingDetails, packageSummary }) {
   return {
     RateRequest: {
@@ -350,9 +394,6 @@ function buildRateRequest({ shipFrom, shippingDetails, packageSummary }) {
         ShipTo: {
           Name: shippingDetails.name || "Customer",
           Address: toUpsAddress(shippingDetails.address)
-        },
-        ShipmentRatingOptions: {
-          NegotiatedRatesIndicator: ""
         },
         Package: [
           {
@@ -491,6 +532,81 @@ function parseTransitDetails(shipment) {
   };
 }
 
+function normalizeEstimatedDeliveryDate(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  const normalized = value.trim();
+  if (/^\d{8}$/.test(normalized)) {
+    return `${normalized.slice(0, 4)}-${normalized.slice(4, 6)}-${normalized.slice(6, 8)}`;
+  }
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    return normalized;
+  }
+
+  const isoDateMatch = normalized.match(/^(\d{4}-\d{2}-\d{2})T/);
+  if (isoDateMatch && isoDateMatch[1]) {
+    return isoDateMatch[1];
+  }
+
+  return null;
+}
+
+function normalizeEstimatedDeliveryTime(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    return null;
+  }
+
+  const normalized = value.trim();
+  if (/^\d{6}$/.test(normalized)) {
+    return normalized;
+  }
+
+  const timeMatch = normalized.match(/T(\d{2}:\d{2}:\d{2})/);
+  if (timeMatch && timeMatch[1]) {
+    return timeMatch[1].replace(/:/g, "");
+  }
+
+  return null;
+}
+
+function buildShippingOptionId(carrier, serviceCode, serviceName) {
+  const normalizedCarrier = toUpperString(carrier) || "CARRIER";
+  const normalizedServiceCode =
+    typeof serviceCode === "string" && serviceCode.trim()
+      ? serviceCode.trim().toUpperCase()
+      : "";
+
+  if (normalizedServiceCode) {
+    return `${normalizedCarrier}:${normalizedServiceCode}`;
+  }
+
+  const fallback = String(serviceName || "shipping")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `${normalizedCarrier}:${fallback || "SHIPPING"}`;
+}
+
+function formatAmountDisplay(amountCents, currency) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency
+  }).format(amountCents / 100);
+}
+
+function decorateShippingOption(option, quotedAt) {
+  return {
+    ...option,
+    optionId: buildShippingOptionId(option.carrier, option.serviceCode, option.serviceName),
+    amountDisplay: formatAmountDisplay(option.amountCents, option.currency),
+    quotedAt
+  };
+}
+
 function parseRatedShipmentOption(shipment) {
   const charge = resolveQuotedCharge(shipment);
   if (!charge) {
@@ -506,6 +622,7 @@ function parseRatedShipmentOption(shipment) {
   return {
     carrier: "UPS",
     serviceCode,
+    mailClass: null,
     serviceName: resolveServiceName(shipment),
     amountCents: charge.amountCents,
     currency: charge.currency,
@@ -513,14 +630,14 @@ function parseRatedShipmentOption(shipment) {
       Number.isFinite(transit.businessDaysInTransit) && transit.businessDaysInTransit > 0
         ? transit.businessDaysInTransit
         : null,
-    estimatedDeliveryDate: transit.estimatedDeliveryDate,
-    estimatedDeliveryTime: transit.estimatedDeliveryTime,
+    estimatedDeliveryDate: normalizeEstimatedDeliveryDate(transit.estimatedDeliveryDate),
+    estimatedDeliveryTime: normalizeEstimatedDeliveryTime(transit.estimatedDeliveryTime),
     negotiated: charge.negotiated
   };
 }
 
-function chooseCheapestQuote(options) {
-  const sorted = options
+function sortOptionsByPrice(options) {
+  return options
     .filter(Boolean)
     .sort((left, right) => {
       if (left.amountCents !== right.amountCents) {
@@ -538,21 +655,69 @@ function chooseCheapestQuote(options) {
 
       return left.serviceName.localeCompare(right.serviceName);
     });
-
-  return sorted[0] || null;
 }
 
-async function quoteCheapestShipping({ productsById, cartItems, shippingDetails }) {
-  const packageSummary = buildPackageSummary(productsById, cartItems);
-  if (!packageSummary) {
-    return {
-      shippingRequired: false,
-      packageSummary: null,
-      quote: null
+function sortOptionsForDisplay(options) {
+  return [...options].sort((left, right) => {
+    const carrierOrder = {
+      USPS: 0,
+      UPS: 1
     };
-  }
 
-  const shipFrom = parseShipFromAddressSecret();
+    const leftCarrierRank =
+      carrierOrder[left.carrier] === undefined ? 99 : carrierOrder[left.carrier];
+    const rightCarrierRank =
+      carrierOrder[right.carrier] === undefined ? 99 : carrierOrder[right.carrier];
+
+    if (leftCarrierRank !== rightCarrierRank) {
+      return leftCarrierRank - rightCarrierRank;
+    }
+
+    if (left.carrier !== right.carrier) {
+      return left.carrier.localeCompare(right.carrier);
+    }
+
+    if (left.amountCents !== right.amountCents) {
+      return left.amountCents - right.amountCents;
+    }
+
+    const leftDays =
+      Number.isFinite(left.businessDaysInTransit) ? left.businessDaysInTransit : 999;
+    const rightDays =
+      Number.isFinite(right.businessDaysInTransit) ? right.businessDaysInTransit : 999;
+    if (leftDays !== rightDays) {
+      return leftDays - rightDays;
+    }
+
+    return left.serviceName.localeCompare(right.serviceName);
+  });
+}
+
+function chooseDefaultOption(options) {
+  return sortOptionsByPrice(options)[0] || null;
+}
+
+function summarizeProviderError(carrier, error) {
+  return {
+    carrier,
+    statusCode:
+      error && Number.isFinite(Number(error.statusCode))
+        ? Number(error.statusCode)
+        : null,
+    message:
+      error instanceof Error
+        ? error.message
+        : error === undefined || error === null
+          ? "Unknown shipping provider error"
+          : String(error),
+    cause:
+      error && error.cause instanceof Error
+        ? error.cause.message
+        : null
+  };
+}
+
+async function quoteUpsShippingOptions({ shipFrom, shippingDetails, packageSummary }) {
   const rateRequest = buildRateRequest({
     shipFrom,
     shippingDetails,
@@ -566,28 +731,337 @@ async function quoteCheapestShipping({ productsById, cartItems, shippingDetails 
       ? response.RateResponse.RatedShipment
       : [];
 
-  const quote = chooseCheapestQuote(ratedShipments.map(parseRatedShipmentOption));
-  if (!quote) {
+  const quotedAt = new Date().toISOString();
+  const options = sortOptionsByPrice(
+    ratedShipments.map(parseRatedShipmentOption).filter(Boolean)
+  )
+    .slice(0, 2)
+    .map((option) => decorateShippingOption(option, quotedAt));
+
+  if (options.length === 0) {
     const error = withStatusError("UPS did not return any valid shipping quotes", 502);
     error.details = response;
     throw error;
   }
 
+  return options;
+}
+
+function resolveUspsServiceName(mailClass) {
+  if (mailClass && USPS_SERVICE_NAME_BY_MAIL_CLASS[mailClass]) {
+    return USPS_SERVICE_NAME_BY_MAIL_CLASS[mailClass];
+  }
+
+  return String(mailClass || "USPS Shipping")
+    .toLowerCase()
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => (part === "usps" ? "USPS" : `${part[0].toUpperCase()}${part.slice(1)}`))
+    .join(" ");
+}
+
+function buildUspsBaseRateRequest({
+  originZIPCode,
+  destinationZIPCode,
+  packageSummary,
+  mailClass,
+  mailingDate
+}) {
+  return {
+    originZIPCode,
+    destinationZIPCode,
+    weight: packageSummary.weightLbs,
+    length: packageSummary.dimensionsIn.length,
+    width: packageSummary.dimensionsIn.width,
+    height: packageSummary.dimensionsIn.height,
+    mailClass,
+    processingCategory: env.uspsProcessingCategory,
+    rateIndicator: env.uspsRateIndicator,
+    destinationEntryFacilityType: env.uspsDestinationEntryFacilityType,
+    priceType: env.uspsPriceType,
+    mailingDate,
+    hasNonstandardCharacteristics: false
+  };
+}
+
+function parseUspsEstimate(payload) {
+  const estimate = Array.isArray(payload) ? payload.find(Boolean) : null;
+  if (!estimate || typeof estimate !== "object") {
+    return {
+      businessDaysInTransit: null,
+      estimatedDeliveryDate: null,
+      estimatedDeliveryTime: null
+    };
+  }
+
+  const delivery =
+    estimate.delivery && typeof estimate.delivery === "object" ? estimate.delivery : null;
+  const scheduledDeliveryValue =
+    delivery && typeof delivery.scheduledDeliveryDateTime === "string"
+      ? delivery.scheduledDeliveryDateTime
+      : typeof estimate.scheduledDeliveryDate === "string"
+        ? estimate.scheduledDeliveryDate
+        : null;
+
+  return {
+    businessDaysInTransit:
+      Number.isFinite(Number(estimate.serviceStandard)) && Number(estimate.serviceStandard) > 0
+        ? Number(estimate.serviceStandard)
+        : Number.isFinite(Number(estimate.days)) && Number(estimate.days) > 0
+          ? Number(estimate.days)
+          : null,
+    estimatedDeliveryDate: normalizeEstimatedDeliveryDate(scheduledDeliveryValue),
+    estimatedDeliveryTime: normalizeEstimatedDeliveryTime(scheduledDeliveryValue)
+  };
+}
+
+function parseUspsBaseRateOption({ mailClass, rateResponse, estimate }) {
+  const rate =
+    rateResponse &&
+    Array.isArray(rateResponse.rates) &&
+    rateResponse.rates[0] &&
+    typeof rateResponse.rates[0] === "object"
+      ? rateResponse.rates[0]
+      : null;
+
+  const amountCents = parseMoneyValue(
+    rate && rate.price !== undefined ? rate.price : rateResponse && rateResponse.totalBasePrice
+  );
+  if (!Number.isInteger(amountCents)) {
+    return null;
+  }
+
+  return {
+    carrier: "USPS",
+    serviceCode: mailClass,
+    mailClass,
+    serviceName: resolveUspsServiceName(mailClass),
+    amountCents,
+    currency: String(env.priceCurrency || "USD").toUpperCase(),
+    businessDaysInTransit:
+      Number.isFinite(estimate.businessDaysInTransit) && estimate.businessDaysInTransit > 0
+        ? estimate.businessDaysInTransit
+        : null,
+    estimatedDeliveryDate: estimate.estimatedDeliveryDate,
+    estimatedDeliveryTime: estimate.estimatedDeliveryTime,
+    negotiated: false
+  };
+}
+
+async function quoteUspsShippingOptions({ shipFrom, shippingDetails, packageSummary }) {
+  const originZIPCode = requireZip5(
+    shipFrom && shipFrom.address ? shipFrom.address.postalCode : "",
+    "SHIP_FROM_ADDRESS.postalCode"
+  );
+  const destinationZIPCode = requireZip5(
+    shippingDetails && shippingDetails.address ? shippingDetails.address.postalCode : "",
+    "shippingDetails.address.postalCode"
+  );
+  const mailingDate = resolveMailingDate();
+  const mailClasses = Array.isArray(env.uspsMailClasses)
+    ? env.uspsMailClasses.filter((entry) => typeof entry === "string" && entry.trim())
+    : [];
+
+  if (mailClasses.length === 0) {
+    throw withStatusError("USPS_MAIL_CLASSES must include at least one mail class", 500);
+  }
+
+  const quotedAt = new Date().toISOString();
+  const results = await Promise.allSettled(
+    mailClasses.map(async (mailClass) => {
+      const [rateResult, estimateResult] = await Promise.allSettled([
+        requestUspsBaseRate(
+          buildUspsBaseRateRequest({
+            originZIPCode,
+            destinationZIPCode,
+            packageSummary,
+            mailClass,
+            mailingDate
+          })
+        ),
+        requestUspsServiceStandards({
+          originZIPCode,
+          destinationZIPCode,
+          acceptanceDate: mailingDate,
+          mailClass
+        })
+      ]);
+
+      if (rateResult.status !== "fulfilled") {
+        throw rateResult.reason;
+      }
+
+      const estimate =
+        estimateResult.status === "fulfilled"
+          ? parseUspsEstimate(estimateResult.value)
+          : (
+              console.warn("USPS service standards unavailable for quoted option", {
+                mailClass,
+                message:
+                  estimateResult.reason instanceof Error
+                    ? estimateResult.reason.message
+                    : String(estimateResult.reason)
+              }),
+              {
+                businessDaysInTransit: null,
+                estimatedDeliveryDate: null,
+                estimatedDeliveryTime: null
+              }
+            );
+
+      const option = parseUspsBaseRateOption({
+        mailClass,
+        rateResponse: rateResult.value,
+        estimate
+      });
+
+      return option ? decorateShippingOption(option, quotedAt) : null;
+    })
+  );
+
+  const options = [];
+  const errors = [];
+
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      if (result.value) {
+        options.push(result.value);
+      }
+      continue;
+    }
+
+    errors.push(result.reason);
+  }
+
+  if (options.length === 0) {
+    if (errors[0]) {
+      throw errors[0];
+    }
+
+    throw withStatusError("USPS did not return any valid shipping quotes", 502);
+  }
+
+  return sortOptionsByPrice(options);
+}
+
+async function quoteShippingOptions({ productsById, cartItems, shippingDetails }) {
+  const packageSummary = buildPackageSummary(productsById, cartItems);
+  if (!packageSummary) {
+    return {
+      shippingRequired: false,
+      packageSummary: null,
+      options: [],
+      defaultOptionId: null,
+      quote: null
+    };
+  }
+
+  const shipFrom = parseShipFromAddressSecret();
+  const providers = [
+    {
+      carrier: "UPS",
+      quote: () =>
+        quoteUpsShippingOptions({
+          shipFrom,
+          shippingDetails,
+          packageSummary
+        })
+    },
+    {
+      carrier: "USPS",
+      quote: () =>
+        quoteUspsShippingOptions({
+          shipFrom,
+          shippingDetails,
+          packageSummary
+        })
+    }
+  ];
+  const providerResults = await Promise.allSettled(
+    providers.map((provider) => provider.quote())
+  );
+
+  const options = [];
+  const errors = [];
+
+  providerResults.forEach((result, index) => {
+    const provider = providers[index];
+    if (result.status === "fulfilled") {
+      options.push(...result.value);
+      return;
+    }
+
+    const providerError = summarizeProviderError(provider.carrier, result.reason);
+    errors.push({
+      ...providerError,
+      error: result.reason
+    });
+    console.warn("Shipping provider unavailable while quoting", providerError);
+  });
+
+  if (options.length === 0) {
+    if (errors[0]) {
+      throw errors[0].error;
+    }
+
+    throw withStatusError("No shipping options were returned for this cart", 502);
+  }
+
+  const displayedOptions = sortOptionsForDisplay(options);
+  const defaultOption = chooseDefaultOption(options);
+
   return {
     shippingRequired: true,
     packageSummary,
-    quote: {
-      ...quote,
-      amountDisplay: new Intl.NumberFormat("en-US", {
-        style: "currency",
-        currency: quote.currency
-      }).format(quote.amountCents / 100),
-      quotedAt: new Date().toISOString()
-    }
+    options: displayedOptions,
+    defaultOptionId: defaultOption ? defaultOption.optionId : null,
+    quote: defaultOption,
+    providerWarnings: errors.map(({ error, ...warning }) => warning)
+  };
+}
+
+async function resolveSelectedShippingOption({
+  productsById,
+  cartItems,
+  shippingDetails,
+  selectedOptionId
+}) {
+  const quoteResult = await quoteShippingOptions({
+    productsById,
+    cartItems,
+    shippingDetails
+  });
+
+  if (!quoteResult.shippingRequired) {
+    return {
+      ...quoteResult,
+      selectedOption: null
+    };
+  }
+
+  const selectedOption = quoteResult.options.find(
+    (option) => option.optionId === selectedOptionId
+  );
+
+  if (!selectedOption) {
+    const error = withStatusError(
+      "Selected shipping option is no longer available. Refresh shipping options and try again.",
+      422
+    );
+    error.details = {
+      availableOptionIds: quoteResult.options.map((option) => option.optionId)
+    };
+    throw error;
+  }
+
+  return {
+    ...quoteResult,
+    selectedOption
   };
 }
 
 module.exports = {
   normalizeShippingDetailsInput,
-  quoteCheapestShipping
+  quoteShippingOptions,
+  resolveSelectedShippingOption
 };

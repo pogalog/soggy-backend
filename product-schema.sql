@@ -24,3 +24,16 @@ create table if not exists product_images (
 );
 
 create index if not exists idx_product_images_product_id on product_images(product_id);
+
+create table if not exists safety (
+  id          bigserial primary key,
+  name        text not null unique,
+  message     text not null,
+  display_type text not null check (display_type in ('embedded', 'cart_add')),
+  updated_by  text not null,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+
+alter table products
+  add column if not exists safety_id bigint references safety(id) on delete set null;

@@ -4,7 +4,10 @@ const { env } = require("../config/env");
 const { getStripeClient } = require("../lib/stripeClient");
 const { sendMail } = require("../lib/mailer");
 const { fetchJsonFromGcs } = require("../lib/gcsJsonClient");
-const { buildOrderConfirmationCustomerEmail } = require("../lib/orderEmailTemplates");
+const {
+  buildOrderConfirmationBusinessEmail,
+  buildOrderConfirmationCustomerEmail
+} = require("../lib/orderEmailTemplates");
 const {
   buildCommissionCustomerDecisionBusinessEmail,
   buildCommissionCustomerDecisionCustomerEmail
@@ -112,6 +115,23 @@ function extractCheckoutCustomerEmail(session) {
   return email.trim();
 }
 
+function extractCheckoutCustomerName(session) {
+  const candidates = [
+    session && session.customer_details && session.customer_details.name,
+    session && session.shipping_details && session.shipping_details.name,
+    session &&
+      session.collected_information &&
+      session.collected_information.shipping_details &&
+      session.collected_information.shipping_details.name
+  ];
+
+  const name = candidates.find(
+    (candidate) => typeof candidate === "string" && candidate.trim()
+  );
+
+  return name ? name.trim() : null;
+}
+
 function extractCheckoutShippingDetails(session) {
   const shippingDetails =
     session &&
@@ -200,6 +220,14 @@ function resolveShippingMethod(session, order) {
     return order.shippingMethod.trim();
   }
 
+  const metadataMethod =
+    session && session.metadata && typeof session.metadata.shipping_method === "string"
+      ? session.metadata.shipping_method.trim()
+      : "";
+  if (metadataMethod === "market" || metadataMethod === "local_delivery") {
+    return metadataMethod;
+  }
+
   const shippingAmount = Number(
     session && session.total_details && session.total_details.amount_shipping
   );
@@ -208,11 +236,104 @@ function resolveShippingMethod(session, order) {
 }
 
 function resolveShippingDetails(session, order) {
+  const customerName = extractCheckoutCustomerName(session);
   if (order && order.shippingDetails && typeof order.shippingDetails === "object") {
-    return order.shippingDetails;
+    return withResolvedCustomerName(order.shippingDetails, customerName);
   }
 
-  return extractCheckoutShippingDetails(session);
+  const shippingMethod = resolveShippingMethod(session, order);
+  if (shippingMethod === "market") {
+    return extractMarketPickupDetails(session, customerName);
+  }
+
+  return withResolvedCustomerName(extractCheckoutShippingDetails(session), customerName);
+}
+
+function withResolvedCustomerName(shippingDetails, customerName) {
+  if (!shippingDetails || typeof shippingDetails !== "object") {
+    return shippingDetails;
+  }
+
+  if (
+    typeof shippingDetails.name === "string" &&
+    shippingDetails.name.trim()
+  ) {
+    return shippingDetails;
+  }
+
+  if (!customerName) {
+    return shippingDetails;
+  }
+
+  return {
+    ...shippingDetails,
+    name: customerName
+  };
+}
+
+function extractMarketPickupDetails(session, customerName) {
+  const metadata = session && session.metadata && typeof session.metadata === "object"
+    ? session.metadata
+    : {};
+  const startTime =
+    typeof metadata.market_pickup_start_time === "string" &&
+    metadata.market_pickup_start_time.trim()
+      ? metadata.market_pickup_start_time.trim()
+      : null;
+  const endTime =
+    typeof metadata.market_pickup_end_time === "string" &&
+    metadata.market_pickup_end_time.trim()
+      ? metadata.market_pickup_end_time.trim()
+      : null;
+  const marketTitle =
+    typeof metadata.market_pickup_title === "string" && metadata.market_pickup_title.trim()
+      ? metadata.market_pickup_title.trim()
+      : null;
+  const marketLink =
+    typeof metadata.market_pickup_link === "string" && metadata.market_pickup_link.trim()
+      ? metadata.market_pickup_link.trim()
+      : null;
+  const line1 =
+    typeof metadata.market_pickup_line1 === "string" && metadata.market_pickup_line1.trim()
+      ? metadata.market_pickup_line1.trim()
+      : null;
+  const city =
+    typeof metadata.market_pickup_city === "string" && metadata.market_pickup_city.trim()
+      ? metadata.market_pickup_city.trim()
+      : null;
+  const state =
+    typeof metadata.market_pickup_state === "string" && metadata.market_pickup_state.trim()
+      ? metadata.market_pickup_state.trim()
+      : null;
+  const country =
+    typeof metadata.market_pickup_country === "string" && metadata.market_pickup_country.trim()
+      ? metadata.market_pickup_country.trim()
+      : "US";
+  const postalCode =
+    typeof metadata.market_pickup_postal_code === "string" &&
+    metadata.market_pickup_postal_code.trim()
+      ? metadata.market_pickup_postal_code.trim()
+      : null;
+
+  if (!startTime || !line1 || !city || !state) {
+    return null;
+  }
+
+  return {
+    name: customerName,
+    address: {
+      line1,
+      line2: null,
+      city,
+      state,
+      postalCode,
+      country
+    },
+    start_time: startTime,
+    end_time: endTime,
+    market_title: marketTitle,
+    market_link: marketLink
+  };
 }
 
 function extractCheckoutChannel(session) {
@@ -256,6 +377,9 @@ function normalizeCheckoutLineItem(lineItem) {
     price && price.product && typeof price.product === "object" ? price.product : null;
   const productId = readProductMetadata(product, "product_id");
   const sku = readProductMetadata(product, "sku") || productId;
+  const variantId = readProductMetadata(product, "variant_id");
+  const variantLabel = readProductMetadata(product, "variant_label");
+  const optionSummary = readProductMetadata(product, "option_summary");
   const name =
     typeof lineItem.description === "string" && lineItem.description.trim()
       ? lineItem.description.trim()
@@ -282,7 +406,11 @@ function normalizeCheckoutLineItem(lineItem) {
   }
 
   return {
+    lineId: `ordln_${lineItem.id || sku || productId}`,
     productId,
+    variantId,
+    variantLabel,
+    optionSummary,
     sku,
     name,
     unitAmount,
@@ -392,6 +520,7 @@ async function handleCheckoutSessionCompleted(pool, session) {
   const existingOrder = resolvedOrderId ? await getOrderById(pool, resolvedOrderId) : null;
 
   if (resolvedOrderId) {
+    const resolvedShippingDetails = resolveShippingDetails(session, existingOrder);
     result = await markOrderPaidAndDecrementInventory(pool, {
       orderId: resolvedOrderId,
       stripeCheckoutSessionId,
@@ -402,12 +531,11 @@ async function handleCheckoutSessionCompleted(pool, session) {
       amountShipping: Number(session.total_details && session.total_details.amount_shipping),
       amountTax: Number(session.total_details && session.total_details.amount_tax),
       amountTotal: Number(session.amount_total),
+      shippingDetails: resolvedShippingDetails,
       shippingMethod:
         existingOrder && typeof existingOrder.shippingMethod === "string"
           ? existingOrder.shippingMethod
-          : Number(session.total_details && session.total_details.amount_shipping) > 0
-            ? "Standard shipping"
-            : null
+          : resolveShippingMethod(session, existingOrder)
     });
   } else {
     const cartSessionId = extractCheckoutCartSessionId(session);
@@ -420,6 +548,7 @@ async function handleCheckoutSessionCompleted(pool, session) {
 
     const stripe = getStripeClient();
     const orderItems = await listCheckoutOrderItems(stripe, stripeCheckoutSessionId);
+    const resolvedShippingDetails = resolveShippingDetails(session, null);
     result = await createPaidOrderFromCheckoutSession(pool, {
       cartSessionId,
       channel: extractCheckoutChannel(session),
@@ -432,15 +561,28 @@ async function handleCheckoutSessionCompleted(pool, session) {
       amountShipping: Number(session.total_details && session.total_details.amount_shipping),
       amountTax: Number(session.total_details && session.total_details.amount_tax),
       amountTotal: Number(session.amount_total),
-      shippingMethod: Number(session.total_details && session.total_details.amount_shipping) > 0
-        ? "Standard shipping"
-        : null
+      shippingMethod: resolveShippingMethod(session, null),
+      shippingDetails: resolvedShippingDetails
     });
     resolvedOrderId = result.orderId;
   }
 
   if (result && result.alreadyPaid === false) {
     const customerEmail = extractCheckoutCustomerEmail(session);
+    let orderForEmail = null;
+    const loadOrderForEmail = async () => {
+      if (orderForEmail) {
+        return orderForEmail;
+      }
+
+      orderForEmail = await getOrderById(pool, resolvedOrderId);
+      if (!orderForEmail) {
+        throw withStatusError("Order not found after payment reconciliation", 404);
+      }
+
+      return orderForEmail;
+    };
+
     if (!customerEmail) {
       console.warn("Checkout completed without customer email; skipping confirmation email", {
         orderId: resolvedOrderId,
@@ -448,11 +590,7 @@ async function handleCheckoutSessionCompleted(pool, session) {
       });
     } else {
       try {
-        const order = await getOrderById(pool, resolvedOrderId);
-        if (!order) {
-          throw withStatusError("Order not found after payment reconciliation", 404);
-        }
-
+        const order = await loadOrderForEmail();
         const emailMessage = buildOrderConfirmationCustomerEmail({
           order,
           shippingDetails: resolveShippingDetails(session, order),
@@ -474,6 +612,31 @@ async function handleCheckoutSessionCompleted(pool, session) {
           message: error instanceof Error ? error.message : String(error)
         });
       }
+    }
+
+    try {
+      const order = await loadOrderForEmail();
+      const businessEmailMessage = buildOrderConfirmationBusinessEmail({
+        order,
+        customerEmail,
+        shippingDetails: resolveShippingDetails(session, order),
+        shippingMethod: resolveShippingMethod(session, order),
+        shippingAmount: Number(session.total_details && session.total_details.amount_shipping),
+        taxSummary: buildTaxSummary(session)
+      });
+      await sendMail({
+        from: env.commissionFromEmail,
+        to: env.commissionBusinessEmail,
+        replyTo: customerEmail || env.commissionFromEmail,
+        subject: businessEmailMessage.subject,
+        html: businessEmailMessage.html
+      });
+    } catch (error) {
+      console.error("Failed to send business order notification email", {
+        orderId: resolvedOrderId,
+        stripeCheckoutSessionId,
+        message: error instanceof Error ? error.message : String(error)
+      });
     }
   }
 

@@ -182,6 +182,65 @@ function buildColorSwatchDetailRow(label, colorValue) {
   `;
 }
 
+function normalizeYarnColors(value, fallbackColor) {
+  const colors = Array.isArray(value) ? value : [];
+  const normalizedColors = colors
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const color = typeof entry.color === "string" ? entry.color.trim() : "";
+      if (!color) {
+        return null;
+      }
+
+      return {
+        color,
+        usage: typeof entry.usage === "string" ? entry.usage.trim() : ""
+      };
+    })
+    .filter(Boolean);
+
+  if (normalizedColors.length > 0) {
+    return normalizedColors;
+  }
+
+  const normalizedFallback = typeof fallbackColor === "string" ? fallbackColor.trim() : "";
+  return normalizedFallback ? [{ color: normalizedFallback, usage: "Primary color" }] : [];
+}
+
+function buildYarnColorsDetailRow(label, yarnColors, fallbackColor) {
+  const normalizedColors = normalizeYarnColors(yarnColors, fallbackColor);
+  const content = normalizedColors.length
+    ? normalizedColors
+        .map((entry) => {
+          const safeColor = escapeHtml(entry.color);
+          const safeUsage = entry.usage ? escapeHtml(entry.usage) : "No usage notes provided";
+
+          return `
+            <div style="margin:0 0 10px 0;">
+              <span style="display:inline-block;width:14px;height:14px;vertical-align:middle;margin-right:10px;border-radius:999px;border:1px solid rgba(255,255,255,0.24);background:${safeColor};"></span>
+              <span style="vertical-align:middle;font-weight:700;">${safeColor}</span>
+              <div style="margin:4px 0 0 26px;color:${theme.textMuted};font-size:13px;line-height:1.55;">${safeUsage}</div>
+            </div>
+          `;
+        })
+        .join("")
+    : "Not provided";
+
+  return `
+    <tr>
+      <td style="padding:12px 14px;border-bottom:1px solid ${theme.panelBorder};font-weight:700;vertical-align:top;width:220px;color:${theme.goldSoft};background:rgba(155,109,255,0.05);">
+        ${escapeHtml(label)}
+      </td>
+      <td style="padding:12px 14px;border-bottom:1px solid ${theme.panelBorder};color:${theme.textPrimary};background:rgba(255,255,255,0.01);">
+        ${content}
+      </td>
+    </tr>
+  `;
+}
+
 function buildTable(rows) {
   return `
     <table style="width:100%;border-collapse:collapse;background:${theme.panelBg};border:1px solid ${theme.panelBorder};border-radius:18px;overflow:hidden;">
@@ -257,7 +316,7 @@ function buildCommissionLifecycleRows(commission) {
     buildDetailRow("Item", commission.itemName),
     buildDetailRow("Description", commission.itemDescription),
     buildDetailRow("Yarn Type", commission.yarnType),
-    buildColorSwatchDetailRow("Yarn Color", commission.yarnColor),
+    buildYarnColorsDetailRow("Yarn Colors", commission.yarnColors, commission.yarnColor),
     buildDetailRow(
       "Attachment Material",
       commission.attachmentMaterialType
@@ -298,7 +357,11 @@ function buildCustomerCommissionEmail({ commissionId, request, imageLinks }) {
     buildDetailRow("Item", request.item.name),
     buildDetailRow("Description", request.item.description),
     buildDetailRow("Yarn Type", request.materials.yarnType),
-    buildColorSwatchDetailRow("Yarn Color", request.materials.yarnColor),
+    buildYarnColorsDetailRow(
+      "Yarn Colors",
+      request.materials.yarnColors,
+      request.materials.yarnColor
+    ),
     buildDetailRow(
       "Attachment Material",
       request.materials.attachmentMaterialType
@@ -348,7 +411,11 @@ function buildBusinessCommissionEmail({ commissionId, request, imageLinks }) {
     buildDetailRow("Item", request.item.name),
     buildDetailRow("Description", request.item.description),
     buildDetailRow("Yarn Type", request.materials.yarnType),
-    buildColorSwatchDetailRow("Yarn Color", request.materials.yarnColor),
+    buildYarnColorsDetailRow(
+      "Yarn Colors",
+      request.materials.yarnColors,
+      request.materials.yarnColor
+    ),
     buildDetailRow(
       "Attachment Material",
       request.materials.attachmentMaterialType

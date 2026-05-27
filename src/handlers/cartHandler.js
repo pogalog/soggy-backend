@@ -9,7 +9,8 @@ const {
   updateCart,
   deleteCart
 } = require("../models/cartModel");
-const { getProductWorkByIds } = require("../models/productModel");
+const { getProductsForCheckoutByIds } = require("../models/productModel");
+const { resolveCartLineItems } = require("../lib/cartLineResolver");
 
 const WORK_DAY_EPSILON = 1e-9;
 
@@ -87,6 +88,10 @@ function isCommissionProductId(productId) {
   return typeof productId === "string" && /^cm_[0-9a-f]+$/i.test(productId);
 }
 
+function toTrimmedString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
 function computeEstimatedProductionDays(totalWorkDays) {
   return totalWorkDays > 0 ? Math.ceil(totalWorkDays - WORK_DAY_EPSILON) : 0;
 }
@@ -124,6 +129,14 @@ function buildCartViolationMessage(violations) {
 
   if (violations.some((violation) => violation.reason === "PRODUCT_NOT_FOUND")) {
     return "One or more cart items are no longer available";
+  }
+
+  if (violations.some((violation) => violation.reason === "VARIANT_SELECTION_REQUIRED")) {
+    return "One or more cart items require a variant selection";
+  }
+
+  if (violations.some((violation) => violation.reason === "INVALID_VARIANT")) {
+    return "One or more cart items include an invalid variant selection";
   }
 
   return "One or more cart items exceed allowed limits";
@@ -164,10 +177,18 @@ function normalizeCartItems(items, { allowEmpty }) {
       throw withStatusError(`items[${index}] must be an object`, 400);
     }
 
+    const lineIdSource = typeof item.lineId === "string" ? item.lineId : item.line_id;
+    const lineId = typeof lineIdSource === "string" ? lineIdSource.trim() : "";
     const productIdSource =
       typeof item.productId === "string" ? item.productId : item.product_id;
     const productId =
       typeof productIdSource === "string" ? productIdSource.trim() : "";
+    const variantIdSource =
+      typeof item.variantId === "string" ? item.variantId : item.variant_id;
+    const variantId =
+      typeof variantIdSource === "string" && variantIdSource.trim()
+        ? variantIdSource.trim()
+        : null;
 
     if (!productId) {
       throw withStatusError(`items[${index}].productId is required`, 400);
@@ -178,13 +199,19 @@ function normalizeCartItems(items, { allowEmpty }) {
       throw withStatusError(`items[${index}].quantity must be a positive integer`, 400);
     }
 
-    if (seen.has(productId)) {
-      throw withStatusError(`Duplicate productId in items: ${productId}`, 400);
+    const dedupeKey = `${productId}::${variantId || ""}`;
+    if (seen.has(dedupeKey)) {
+      throw withStatusError(
+        `Duplicate cart line in items: ${productId}${variantId ? ` (${variantId})` : ""}`,
+        400
+      );
     }
-    seen.add(productId);
+    seen.add(dedupeKey);
 
     return {
+      lineId: lineId || null,
       productId,
+      variantId,
       quantity
     };
   });
@@ -193,6 +220,7 @@ function normalizeCartItems(items, { allowEmpty }) {
 async function inspectCartItems(pool, items) {
   if (!Array.isArray(items) || items.length === 0) {
     return {
+      normalizedItems: [],
       violations: [],
       totalWorkDays: 0,
       estimatedProductionDays: 0,
@@ -203,26 +231,21 @@ async function inspectCartItems(pool, items) {
     };
   }
 
-  const productIds = items.map((item) => item.productId);
-  const workByProductId = await getProductWorkByIds(pool, productIds);
-  const violations = [];
+  const productIds = [...new Set(items.map((item) => item.productId))];
+  const productsById = await getProductsForCheckoutByIds(pool, productIds);
+  const { resolvedItems, violations } = resolveCartLineItems(productsById, items);
   let totalWorkDays = 0;
 
-  for (const item of items) {
-    const daysToCreate = workByProductId.get(item.productId);
-
-    if (daysToCreate === undefined) {
-      violations.push({
-        productId: item.productId,
-        requestedQuantity: item.quantity,
-        reason: "PRODUCT_NOT_FOUND"
-      });
+  for (const item of resolvedItems) {
+    if (item.validationReason) {
       continue;
     }
 
     if (isCommissionProductId(item.productId) && item.quantity > 1) {
       violations.push({
+        lineId: item.lineId,
         productId: item.productId,
+        variantId: item.variantId,
         requestedQuantity: item.quantity,
         maxCartQty: 1,
         reason: "EXCEEDS_MAX_CART_QTY"
@@ -230,20 +253,26 @@ async function inspectCartItems(pool, items) {
     }
 
     if (!isCommissionProductId(item.productId)) {
-      totalWorkDays += Number(daysToCreate) * item.quantity;
+      totalWorkDays += Number(item.daysToCreate || 0) * item.quantity;
     }
   }
 
   if (totalWorkDays > env.maxCartWorkDays + WORK_DAY_EPSILON) {
-    for (const item of items) {
+    for (const item of resolvedItems) {
+      if (item.validationReason) {
+        continue;
+      }
+
       if (isCommissionProductId(item.productId)) {
         continue;
       }
 
       violations.push({
+        lineId: item.lineId,
         productId: item.productId,
+        variantId: item.variantId,
         requestedQuantity: item.quantity,
-        requestedWorkDays: Number(workByProductId.get(item.productId) || 0) * item.quantity,
+        requestedWorkDays: Number(item.daysToCreate || 0) * item.quantity,
         totalRequestedWorkDays: totalWorkDays,
         maxCartWorkDays: env.maxCartWorkDays,
         reason: "EXCEEDS_MAX_CART_WORK_DAYS"
@@ -253,6 +282,19 @@ async function inspectCartItems(pool, items) {
 
   const estimatedProductionDays = computeEstimatedProductionDays(totalWorkDays);
   return {
+    normalizedItems: resolvedItems.map((item) => ({
+      lineId: item.lineId,
+      productId: item.productId,
+      variantId: item.variantId,
+      variantLabel: item.variantLabel,
+      optionSummary: item.optionSummary,
+      sku: item.sku,
+      unitAmount: item.unitAmount,
+      currency: item.currency,
+      quantity: item.quantity,
+      lastUpdated: item.lastUpdated,
+      validationReason: item.validationReason
+    })),
     violations,
     totalWorkDays,
     estimatedProductionDays,
@@ -278,6 +320,7 @@ async function validateCartItemQuantities(pool, items) {
 async function buildCartSummary(pool, items) {
   const inspection = await inspectCartItems(pool, items);
   return {
+    normalizedItems: inspection.normalizedItems,
     totalWorkDays: inspection.totalWorkDays,
     estimatedProductionDays: inspection.estimatedProductionDays,
     shipByDate: inspection.shipByDate,
@@ -296,7 +339,19 @@ async function attachSummary(pool, cart) {
   const summary = await buildCartSummary(pool, items);
   return {
     ...cart,
-    summary
+    items: summary.normalizedItems.map((item) => ({
+      ...item,
+      lastUpdated:
+        items.find((entry) => entry.lineId === item.lineId)?.lastUpdated || item.lastUpdated
+    })),
+    summary: {
+      totalWorkDays: summary.totalWorkDays,
+      estimatedProductionDays: summary.estimatedProductionDays,
+      shipByDate: summary.shipByDate,
+      isAtCapacity: summary.isAtCapacity,
+      remainingWorkDays: summary.remainingWorkDays,
+      maxCartWorkDays: summary.maxCartWorkDays
+    }
   };
 }
 
@@ -328,8 +383,18 @@ function createCartHandler({ getPool }) {
         sessionId = extractSessionId(req, body) || generateSessionId();
         const items = normalizeCartItems(body.items, { allowEmpty: false });
         const pool = getPool();
-        await validateCartItemQuantities(pool, items);
-        const cart = await createCart(pool, { sessionId, items });
+        const inspection = await validateCartItemQuantities(pool, items);
+        const cart = await createCart(pool, {
+          sessionId,
+          items: inspection.normalizedItems.map((item) => ({
+            lineId: item.lineId,
+            productId: item.productId,
+            variantId: item.variantId,
+            variantLabel: item.variantLabel,
+            optionSummary: item.optionSummary,
+            quantity: item.quantity
+          }))
+        });
         return res.status(201).json(await attachSummary(pool, cart));
       }
 
@@ -337,8 +402,18 @@ function createCartHandler({ getPool }) {
         sessionId = requireSessionId(req, body);
         const items = normalizeCartItems(body.items, { allowEmpty: true });
         const pool = getPool();
-        await validateCartItemQuantities(pool, items);
-        const cart = await updateCart(pool, { sessionId, items });
+        const inspection = await validateCartItemQuantities(pool, items);
+        const cart = await updateCart(pool, {
+          sessionId,
+          items: inspection.normalizedItems.map((item) => ({
+            lineId: item.lineId,
+            productId: item.productId,
+            variantId: item.variantId,
+            variantLabel: item.variantLabel,
+            optionSummary: item.optionSummary,
+            quantity: item.quantity
+          }))
+        });
         return res.status(200).json(await attachSummary(pool, cart));
       }
 

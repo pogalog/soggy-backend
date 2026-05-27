@@ -1,15 +1,30 @@
 "use strict";
 
+const { randomUUID } = require("node:crypto");
+
 const SELECT_CART_BY_SESSION_SQL = `
   SELECT
+    line_id,
     session_id,
     product_id,
+    variant_id,
+    variant_label,
+    option_summary,
     quantity,
     last_updated
   FROM cart
   WHERE session_id = $1
-  ORDER BY product_id
+  ORDER BY last_updated, line_id
 `;
+
+function toTrimmedString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeVariantId(value) {
+  const trimmed = toTrimmedString(value);
+  return trimmed || null;
+}
 
 function mapCart(sessionId, rows) {
   if (!rows || rows.length === 0) {
@@ -28,7 +43,11 @@ function mapCart(sessionId, rows) {
     }
 
     return {
+      lineId: row.line_id,
       productId: row.product_id,
+      variantId: normalizeVariantId(row.variant_id),
+      variantLabel: toTrimmedString(row.variant_label),
+      optionSummary: toTrimmedString(row.option_summary),
       quantity: row.quantity,
       lastUpdated: updatedAt.toISOString()
     };
@@ -44,14 +63,33 @@ function mapCart(sessionId, rows) {
 function buildInsertCartItemsQuery(sessionId, items) {
   const values = [];
   const placeholders = items.map((item, index) => {
-    const base = index * 3;
-    values.push(sessionId, item.productId, item.quantity);
-    return `($${base + 1}, $${base + 2}, $${base + 3}, NOW())`;
+    const base = index * 7;
+    const lineId = toTrimmedString(item.lineId) || `cartln_${randomUUID()}`;
+    const variantId = normalizeVariantId(item.variantId);
+    values.push(
+      lineId,
+      sessionId,
+      item.productId,
+      variantId,
+      toTrimmedString(item.variantLabel),
+      toTrimmedString(item.optionSummary),
+      item.quantity
+    );
+    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, NOW())`;
   });
 
   return {
     text: `
-      INSERT INTO cart (session_id, product_id, quantity, last_updated)
+      INSERT INTO cart (
+        line_id,
+        session_id,
+        product_id,
+        variant_id,
+        variant_label,
+        option_summary,
+        quantity,
+        last_updated
+      )
       VALUES ${placeholders.join(", ")}
     `,
     values

@@ -131,6 +131,24 @@ const env = {
     { min: 0, max: 4 }
   ),
   upsTimeoutMs: readPositiveInt(process.env.UPS_TIMEOUT_MS, 12000),
+  uspsConsumerKey: process.env.USPS_CONSUMER_KEY,
+  uspsConsumerSecret: process.env.USPS_CONSUMER_SECRET,
+  uspsBaseUrl: process.env.USPS_BASE_URL || "https://apis.usps.com",
+  uspsServiceStandardsBaseUrl:
+    process.env.USPS_SERVICE_STANDARDS_BASE_URL || "https://apis.usps.com",
+  uspsProcessingCategory:
+    process.env.USPS_PROCESSING_CATEGORY || "MACHINABLE",
+  uspsRateIndicator: process.env.USPS_RATE_INDICATOR || "SP",
+  uspsDestinationEntryFacilityType:
+    process.env.USPS_DESTINATION_ENTRY_FACILITY_TYPE || "NONE",
+  uspsPriceType: process.env.USPS_PRICE_TYPE || "COMMERCIAL",
+  uspsMailClasses: readCsvList(process.env.USPS_MAIL_CLASSES, [
+    "USPS_GROUND_ADVANTAGE",
+    "PARCEL_SELECT",
+    "PRIORITY_MAIL",
+    "PRIORITY_MAIL_EXPRESS"
+  ]),
+  uspsTimeoutMs: readPositiveInt(process.env.USPS_TIMEOUT_MS, 12000),
   commissionGcsBucket:
     process.env.COMMISSION_GCS_BUCKET || "soggy-commission-requests",
   commissionFromEmail:

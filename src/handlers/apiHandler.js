@@ -34,6 +34,22 @@ function isProductRequest(req) {
   return Boolean(req.query && typeof req.query.id === "string" && req.query.id.trim());
 }
 
+function isProductCatalogRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/products/search" ||
+    path === "/api/products/search" ||
+    path === "/products/filters" ||
+    path === "/api/products/filters" ||
+    path === "/products/featured-categories" ||
+    path === "/api/products/featured-categories" ||
+    path === "/tags" ||
+    path === "/tags/" ||
+    path === "/api/tags" ||
+    path === "/api/tags/"
+  );
+}
+
 function isCommissionDetailsRequest(req) {
   const path = normalizePath(req);
   return (
@@ -51,6 +67,26 @@ function isCheckoutSessionRequest(req) {
     path === "/checkout/session/" ||
     path === "/api/checkout/session" ||
     path === "/api/checkout/session/"
+  );
+}
+
+function isWorkReservationRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/work-reservations" ||
+    path === "/work-reservations/" ||
+    path === "/api/work-reservations" ||
+    path === "/api/work-reservations/"
+  );
+}
+
+function isWorkEstimateRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/work-estimates" ||
+    path === "/work-estimates/" ||
+    path === "/api/work-estimates" ||
+    path === "/api/work-estimates/"
   );
 }
 
@@ -140,10 +176,13 @@ function isMarketRequest(req) {
 
 function createApiHandler({
   productHandler,
+  productCatalogHandler,
   commissionDetailsHandler,
   cartHandler,
   orderHandler,
   checkoutHandler,
+  workEstimateHandler,
+  workReservationHandler,
   shippingQuoteHandler,
   stripeWebhookHandler,
   commissionResponseHandler,
@@ -173,6 +212,14 @@ function createApiHandler({
         return checkoutHandler(req, res);
       }
 
+      if (workReservationHandler && isWorkReservationRequest(req)) {
+        return workReservationHandler(req, res);
+      }
+
+      if (workEstimateHandler && isWorkEstimateRequest(req)) {
+        return workEstimateHandler(req, res);
+      }
+
       if (shippingQuoteHandler && isShippingQuoteRequest(req)) {
         return shippingQuoteHandler(req, res);
       }
@@ -189,6 +236,10 @@ function createApiHandler({
         return commissionDetailsHandler(req, res);
       }
 
+      if (productCatalogHandler && isProductCatalogRequest(req)) {
+        return productCatalogHandler(req, res);
+      }
+
       if (isCartRequest(req)) {
         return cartHandler(req, res);
       }
@@ -199,7 +250,7 @@ function createApiHandler({
 
       return res.status(404).json({
         error:
-          "Route not found. Use /products/:id, /products/commissions, /markets, /cart/:sessionId, /commissions, /commissions/respond, /commissions/commit, /commission/finalize, /api/orders/:id, /api/shipping/quote, /api/checkout/session, or /api/stripe/webhook"
+          "Route not found. Use /products/:id, /products/search, /products/filters, /products/featured-categories, /tags, /products/commissions, /markets, /cart/:sessionId, /commissions, /commissions/respond, /commissions/commit, /commission/finalize, /api/orders/:id, /api/shipping/quote, /api/work-estimates, /api/work-reservations, /api/checkout/session, or /api/stripe/webhook"
       });
     } catch (error) {
       console.error("Unhandled API routing error", {
