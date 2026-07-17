@@ -174,6 +174,18 @@ function isMarketRequest(req) {
   );
 }
 
+function isSiteContentRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/site-content" ||
+    path === "/site-content/" ||
+    path === "/api/site-content" ||
+    path === "/api/site-content/" ||
+    path.startsWith("/site-content/") ||
+    path.startsWith("/api/site-content/")
+  );
+}
+
 function createApiHandler({
   productHandler,
   productCatalogHandler,
@@ -188,7 +200,8 @@ function createApiHandler({
   commissionResponseHandler,
   commissionLifecycleHandler,
   commissionFormHandler,
-  marketHandler
+  marketHandler,
+  siteContentHandler
 }) {
   return async function api(req, res) {
     try {
@@ -230,6 +243,10 @@ function createApiHandler({
 
       if (marketHandler && isMarketRequest(req)) {
         return marketHandler(req, res);
+      }
+
+      if (siteContentHandler && isSiteContentRequest(req)) {
+        return siteContentHandler(req, res);
       }
 
       if (commissionDetailsHandler && isCommissionDetailsRequest(req)) {

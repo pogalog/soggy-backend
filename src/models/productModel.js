@@ -427,7 +427,10 @@ function mapCommissionRow(row) {
 
 async function getProductSchemaSupport(pool) {
   if (hasCheckedProductSchemaSupport && cachedProductSchemaSupport) {
-    return cachedProductSchemaSupport;
+    // Re-check once if optional tables added after startup weren't present on first check.
+    if (cachedProductSchemaSupport.hasImageVariants) {
+      return cachedProductSchemaSupport;
+    }
   }
 
   const productColumns = [
@@ -470,7 +473,8 @@ async function getProductSchemaSupport(pool) {
     "variant_option_values",
     "attributes",
     "attribute_values",
-    "product_attribute_values"
+    "product_attribute_values",
+    "product_image_variants"
   ];
 
   const [columnResult, tableResult, extensionResult] = await Promise.all([
@@ -530,6 +534,7 @@ async function getProductSchemaSupport(pool) {
       columns.has("shipping_height_in"),
     hasSafety: columns.has("safety_id") && tables.has("safety"),
     hasImages: tables.has("product_images"),
+    hasImageVariants: tables.has("product_image_variants"),
     hasCategories: tables.has("categories") && tables.has("product_categories"),
     hasTags: tables.has("tags") && tables.has("product_tags"),
     hasOptions: tables.has("product_options") && tables.has("product_option_values"),
@@ -648,7 +653,19 @@ function buildProductByIdSql(support) {
         json_agg(
           json_build_object(
             'path', pi.path,
-            'alt', pi.alt
+            'alt', pi.alt${
+              support.hasImageVariants
+                ? `,
+            'variantIds', (
+              SELECT COALESCE(
+                json_agg(piv.variant_id ORDER BY piv.variant_id),
+                '[]'::json
+              )
+              FROM product_image_variants piv
+              WHERE piv.image_id = pi.id
+            )`
+                : ""
+            }
           )
           ORDER BY pi.sort_order, pi.id
         ),

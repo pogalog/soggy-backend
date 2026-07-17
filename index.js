@@ -16,6 +16,7 @@ const { createWorkReservationHandler } = require("./src/handlers/workReservation
 const { createShippingQuoteHandler } = require("./src/handlers/shippingQuoteHandler");
 const { createStripeWebhookHandler } = require("./src/handlers/stripeWebhookHandler");
 const { createMarketHandler } = require("./src/handlers/marketHandler");
+const { createSiteContentHandler } = require("./src/handlers/siteContentHandler");
 const { createApiHandler } = require("./src/handlers/apiHandler");
 const { getPool } = require("./src/db/pool");
 
@@ -33,6 +34,7 @@ const workReservationHandler = createWorkReservationHandler({ getPool });
 const shippingQuoteHandler = createShippingQuoteHandler({ getPool });
 const stripeWebhookHandler = createStripeWebhookHandler({ getPool });
 const marketHandler = createMarketHandler({ getPool });
+const siteContentHandler = createSiteContentHandler({ getPool });
 const api = createApiHandler({
   productHandler,
   productCatalogHandler,
@@ -47,7 +49,8 @@ const api = createApiHandler({
   workReservationHandler,
   shippingQuoteHandler,
   stripeWebhookHandler,
-  marketHandler
+  marketHandler,
+  siteContentHandler
 });
 
 module.exports = {
