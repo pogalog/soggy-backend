@@ -11,6 +11,10 @@ const {
 } = require("../models/cartModel");
 const { getProductsForCheckoutByIds } = require("../models/productModel");
 const { resolveCartLineItems } = require("../lib/cartLineResolver");
+const {
+  consumesProductionCapacity,
+  hasFixedSingleQuantity
+} = require("../lib/productCapabilities");
 
 const WORK_DAY_EPSILON = 1e-9;
 
@@ -241,7 +245,7 @@ async function inspectCartItems(pool, items) {
       continue;
     }
 
-    if (isCommissionProductId(item.productId) && item.quantity > 1) {
+    if (hasFixedSingleQuantity(item) && item.quantity > 1) {
       violations.push({
         lineId: item.lineId,
         productId: item.productId,
@@ -252,7 +256,7 @@ async function inspectCartItems(pool, items) {
       });
     }
 
-    if (!isCommissionProductId(item.productId)) {
+    if (consumesProductionCapacity(item)) {
       totalWorkDays += Number(item.daysToCreate || 0) * item.quantity;
     }
   }
@@ -263,7 +267,7 @@ async function inspectCartItems(pool, items) {
         continue;
       }
 
-      if (isCommissionProductId(item.productId)) {
+      if (!consumesProductionCapacity(item)) {
         continue;
       }
 

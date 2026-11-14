@@ -122,6 +122,16 @@ function isStripeWebhookRequest(req) {
   );
 }
 
+function isDigitalDownloadRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/digital-downloads" ||
+    path === "/digital-downloads/" ||
+    path === "/api/digital-downloads" ||
+    path === "/api/digital-downloads/"
+  );
+}
+
 function isCommissionFormRequest(req) {
   const path = normalizePath(req);
   return (
@@ -174,7 +184,20 @@ function isMarketRequest(req) {
   );
 }
 
+function isSiteContentRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/site-content" ||
+    path === "/site-content/" ||
+    path === "/api/site-content" ||
+    path === "/api/site-content/" ||
+    path.startsWith("/site-content/") ||
+    path.startsWith("/api/site-content/")
+  );
+}
+
 function createApiHandler({
+  commissionImageHandler,
   productHandler,
   productCatalogHandler,
   commissionDetailsHandler,
@@ -184,11 +207,13 @@ function createApiHandler({
   workEstimateHandler,
   workReservationHandler,
   shippingQuoteHandler,
+  digitalDownloadHandler,
   stripeWebhookHandler,
   commissionResponseHandler,
   commissionLifecycleHandler,
   commissionFormHandler,
-  marketHandler
+  marketHandler,
+  siteContentHandler
 }) {
   return async function api(req, res) {
     try {
@@ -224,12 +249,24 @@ function createApiHandler({
         return shippingQuoteHandler(req, res);
       }
 
+      if (digitalDownloadHandler && isDigitalDownloadRequest(req)) {
+        return digitalDownloadHandler(req, res);
+      }
+
       if (orderHandler && isOrderRequest(req)) {
         return orderHandler(req, res);
       }
 
       if (marketHandler && isMarketRequest(req)) {
         return marketHandler(req, res);
+      }
+
+      if (siteContentHandler && isSiteContentRequest(req)) {
+        return siteContentHandler(req, res);
+      }
+
+      if (commissionImageHandler && /^\/(api\/)?commissions\/images\/?$/.test(normalizePath(req))) {
+        return commissionImageHandler(req, res);
       }
 
       if (commissionDetailsHandler && isCommissionDetailsRequest(req)) {
@@ -250,7 +287,7 @@ function createApiHandler({
 
       return res.status(404).json({
         error:
-          "Route not found. Use /products/:id, /products/search, /products/filters, /products/featured-categories, /tags, /products/commissions, /markets, /cart/:sessionId, /commissions, /commissions/respond, /commissions/commit, /commission/finalize, /api/orders/:id, /api/shipping/quote, /api/work-estimates, /api/work-reservations, /api/checkout/session, or /api/stripe/webhook"
+          "Route not found. Use /products/:id, /products/search, /products/filters, /products/featured-categories, /tags, /products/commissions, /markets, /cart/:sessionId, /commissions, /commissions/respond, /commissions/commit, /commission/finalize, /api/orders/:id, /api/digital-downloads, /api/shipping/quote, /api/work-estimates, /api/work-reservations, /api/checkout/session, or /api/stripe/webhook"
       });
     } catch (error) {
       console.error("Unhandled API routing error", {

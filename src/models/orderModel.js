@@ -2,6 +2,8 @@
 
 const { randomUUID } = require("node:crypto");
 const { consumeReservationForOrder } = require("./workQueueModel");
+const { reconcileCommissionPayment } = require("./commissionPaymentModel");
+const { COMMISSION_COMMERCE_SELECT, getCommissionPurchase } = require("../lib/commissionCommerce");
 
 function withStatusError(message, statusCode) {
   const error = new Error(message);
@@ -28,7 +30,7 @@ function isCommissionOrderItem(productId) {
 function buildInsertOrderItemsQuery(orderId, items) {
   const values = [];
   const placeholders = items.map((item, index) => {
-    const base = index * 12;
+    const base = index * 13;
     values.push(
       item.lineId || `ordln_${randomUUID()}`,
       orderId,
@@ -41,10 +43,13 @@ function buildInsertOrderItemsQuery(orderId, items) {
       item.unitAmount,
       item.quantity,
       item.stripeThumbUrl || null,
-      Number.isFinite(Number(item.workUnits)) ? Number(item.workUnits) : 0
+      Number.isFinite(Number(item.workUnits)) ? Number(item.workUnits) : 0,
+      item.productKind ||
+        item.kind ||
+        (isCommissionOrderItem(item.productId) ? "commission_commitment" : "repeatable")
     );
 
-    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12})`;
+    return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}, $${base + 8}, $${base + 9}, $${base + 10}, $${base + 11}, $${base + 12}, $${base + 13})`;
   });
 
   return {
@@ -61,7 +66,8 @@ function buildInsertOrderItemsQuery(orderId, items) {
         unit_amount,
         quantity,
         stripe_thumb_url,
-        work_units
+        work_units,
+        product_kind
       )
       VALUES ${placeholders.join(", ")}
     `,
@@ -94,7 +100,24 @@ async function getOrderColumnSupport(pool) {
           'shipping_quote'
           ,'ship_by_date',
           'work_scheduled_at',
-          'work_completed_at'
+          'work_completed_at',
+          'fulfillment_carrier',
+          'tracking_number',
+          'tracking_url',
+          'fulfillment_notes',
+          'shipped_at',
+          'customer_email',
+          'carrier_status_type',
+          'carrier_status_code',
+          'carrier_status_description',
+          'carrier_status_at',
+          'carrier_status_location',
+          'estimated_delivery_date',
+          'last_tracking_event_at',
+          'delivered_at',
+          'tracking_subscription_status',
+          'tracking_subscribed_at',
+          'tracking_subscription_error'
         )
     `
   );
@@ -109,7 +132,26 @@ async function getOrderColumnSupport(pool) {
     hasWorkQueueColumns:
       columnNames.has("ship_by_date") &&
       columnNames.has("work_scheduled_at") &&
-      columnNames.has("work_completed_at")
+      columnNames.has("work_completed_at"),
+    hasFulfillmentColumns:
+      columnNames.has("fulfillment_carrier") &&
+      columnNames.has("tracking_number") &&
+      columnNames.has("tracking_url") &&
+      columnNames.has("fulfillment_notes") &&
+      columnNames.has("shipped_at"),
+    hasCustomerEmailColumn: columnNames.has("customer_email"),
+    hasTrackingWorkflowColumns:
+      columnNames.has("carrier_status_type") &&
+      columnNames.has("carrier_status_code") &&
+      columnNames.has("carrier_status_description") &&
+      columnNames.has("carrier_status_at") &&
+      columnNames.has("carrier_status_location") &&
+      columnNames.has("estimated_delivery_date") &&
+      columnNames.has("last_tracking_event_at") &&
+      columnNames.has("delivered_at") &&
+      columnNames.has("tracking_subscription_status") &&
+      columnNames.has("tracking_subscribed_at") &&
+      columnNames.has("tracking_subscription_error")
   };
   return cachedOrderColumnSupport;
 }
@@ -132,15 +174,29 @@ async function createPendingOrder(
     throw withStatusError("Cannot create an order for an empty cart", 422);
   }
 
-  const client = await pool.connect();
   const orderId = randomUUID();
   const subtotalAmount = computeSubtotal(items);
   const normalizedShippingAmount = normalizeOptionalInt(shippingAmount);
   const totalAmount = subtotalAmount + (normalizedShippingAmount || 0);
+  const checkoutExpiresAt = Math.floor(Date.now() / 1000) + 35 * 60;
   const columnSupport = await getOrderColumnSupport(pool);
+  const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
+
+    const commissionItems = items.filter((item) => isCommissionOrderItem(item.productId));
+    if (commissionItems.length) {
+      const locked = await client.query(`${COMMISSION_COMMERCE_SELECT}
+        WHERE c.id = ANY($1::text[]) ORDER BY c.id FOR UPDATE OF c`,
+      [commissionItems.map((item) => item.productId)]);
+      for (const item of commissionItems) {
+        const purchase = getCommissionPurchase(locked.rows.find((row) => row.id === item.productId));
+        if (!purchase || purchase.kind !== item.productKind || purchase.amount !== item.unitAmount || item.quantity !== 1) {
+          throw withStatusError("Commission pricing or status changed. Refresh the commission before checking out.", 409);
+        }
+      }
+    }
 
     const columns = [
       "id",
@@ -200,6 +256,16 @@ async function createPendingOrder(
     const insertItemsQuery = buildInsertOrderItemsQuery(orderId, items);
     await client.query(insertItemsQuery.text, insertItemsQuery.values);
 
+    for (const item of commissionItems) {
+      const claim = await client.query(`
+        INSERT INTO commission_checkout_claims (commission_id, stage, order_id, expires_at)
+        VALUES ($1, $2, $3, to_timestamp($4))
+        ON CONFLICT (commission_id, stage) DO UPDATE SET order_id = EXCLUDED.order_id, expires_at = EXCLUDED.expires_at
+          WHERE commission_checkout_claims.expires_at <= NOW()
+        RETURNING order_id`, [item.productId, item.productKind, orderId, checkoutExpiresAt]);
+      if (!claim.rowCount) throw withStatusError("This commission already has an active checkout. Please retry in a moment.", 409);
+    }
+
     await client.query("COMMIT");
 
     return {
@@ -215,7 +281,8 @@ async function createPendingOrder(
       shippingDetails: normalizeOptionalObject(shippingDetails),
       shippingQuote: normalizeOptionalObject(shippingQuote),
       shipByDate: shipByDate || null,
-      totalAmount
+      totalAmount,
+      checkoutExpiresAt
     };
   } catch (error) {
     await client.query("ROLLBACK");
@@ -301,6 +368,17 @@ async function getOrderRecordById(pool, orderId) {
             ? "ship_by_date,\n        work_scheduled_at,\n        work_completed_at,"
             : "NULL::date AS ship_by_date,\n        NULL::timestamptz AS work_scheduled_at,\n        NULL::timestamptz AS work_completed_at,"
         }
+        ${
+          columnSupport.hasFulfillmentColumns
+            ? "fulfillment_carrier,\n        tracking_number,\n        tracking_url,\n        fulfillment_notes,\n        shipped_at,"
+            : "NULL::text AS fulfillment_carrier,\n        NULL::text AS tracking_number,\n        NULL::text AS tracking_url,\n        NULL::text AS fulfillment_notes,\n        NULL::timestamptz AS shipped_at,"
+        }
+        ${columnSupport.hasCustomerEmailColumn ? "customer_email," : "NULL::text AS customer_email,"}
+        ${
+          columnSupport.hasTrackingWorkflowColumns
+            ? "carrier_status_type,\n        carrier_status_code,\n        carrier_status_description,\n        carrier_status_at,\n        carrier_status_location,\n        estimated_delivery_date,\n        last_tracking_event_at,\n        delivered_at,\n        tracking_subscription_status,\n        tracking_subscribed_at,\n        tracking_subscription_error,"
+            : "NULL::text AS carrier_status_type,\n        NULL::text AS carrier_status_code,\n        NULL::text AS carrier_status_description,\n        NULL::timestamptz AS carrier_status_at,\n        NULL::jsonb AS carrier_status_location,\n        NULL::date AS estimated_delivery_date,\n        NULL::timestamptz AS last_tracking_event_at,\n        NULL::timestamptz AS delivered_at,\n        NULL::text AS tracking_subscription_status,\n        NULL::timestamptz AS tracking_subscribed_at,\n        NULL::text AS tracking_subscription_error,"
+        }
         created_at,
         updated_at
       FROM orders
@@ -327,7 +405,8 @@ async function getOrderRecordById(pool, orderId) {
         unit_amount,
         quantity,
         stripe_thumb_url,
-        work_units
+        work_units,
+        product_kind
       FROM order_items
       WHERE order_id = $1
       ORDER BY created_at ASC, line_id ASC
@@ -364,6 +443,32 @@ async function getOrderRecordById(pool, orderId) {
       order.work_completed_at === null || order.work_completed_at === undefined
         ? null
         : new Date(order.work_completed_at).toISOString(),
+    fulfillmentCarrier: order.fulfillment_carrier || null,
+    trackingNumber: order.tracking_number || null,
+    trackingUrl: order.tracking_url || null,
+    fulfillmentNotes: order.fulfillment_notes || null,
+    customerEmail: order.customer_email || null,
+    shippedAt:
+      order.shipped_at === null || order.shipped_at === undefined
+        ? null
+        : new Date(order.shipped_at).toISOString(),
+    carrierStatusType: order.carrier_status_type || null,
+    carrierStatusCode: order.carrier_status_code || null,
+    carrierStatusDescription: order.carrier_status_description || null,
+    carrierStatusAt: order.carrier_status_at ? new Date(order.carrier_status_at).toISOString() : null,
+    carrierStatusLocation: normalizeOptionalObject(order.carrier_status_location),
+    estimatedDeliveryDate: order.estimated_delivery_date
+      ? new Date(order.estimated_delivery_date).toISOString().slice(0, 10)
+      : null,
+    lastTrackingEventAt: order.last_tracking_event_at
+      ? new Date(order.last_tracking_event_at).toISOString()
+      : null,
+    deliveredAt: order.delivered_at ? new Date(order.delivered_at).toISOString() : null,
+    trackingSubscriptionStatus: order.tracking_subscription_status || null,
+    trackingSubscribedAt: order.tracking_subscribed_at
+      ? new Date(order.tracking_subscribed_at).toISOString()
+      : null,
+    trackingSubscriptionError: order.tracking_subscription_error || null,
     totalAmount: Number(order.total_amount),
     stripeCheckoutSessionId:
       typeof order.stripe_checkout_session_id === "string" &&
@@ -395,6 +500,7 @@ async function getOrderRecordById(pool, orderId) {
         item.work_units === null || item.work_units === undefined
           ? 0
           : Number(item.work_units),
+      productKind: item.product_kind || "repeatable",
       stripeThumbUrl:
         typeof item.stripe_thumb_url === "string" && item.stripe_thumb_url.trim()
           ? item.stripe_thumb_url.trim()
@@ -409,7 +515,7 @@ async function getOrderById(pool, orderId) {
     return null;
   }
 
-  const { stripeCheckoutSessionId, ...publicOrder } = order;
+  const { stripeCheckoutSessionId, customerEmail, ...publicOrder } = order;
   return publicOrder;
 }
 
@@ -513,15 +619,16 @@ async function createPaidOrderFromCheckoutSession(
     amountTax,
     amountTotal,
     shippingMethod,
-    shippingDetails
+    shippingDetails,
+    customerEmail
   }
 ) {
   if (!Array.isArray(items) || items.length === 0) {
     throw withStatusError("Checkout session did not contain any order items", 422);
   }
 
-  const client = await pool.connect();
   const columnSupport = await getOrderColumnSupport(pool);
+  const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
@@ -538,22 +645,21 @@ async function createPaidOrderFromCheckoutSession(
 
     if (existingResult.rowCount > 0) {
       const existingOrder = existingResult.rows[0];
+      if (columnSupport.hasCustomerEmailColumn && customerEmail) {
+        await client.query(
+          `UPDATE orders SET customer_email = COALESCE(customer_email, $2), updated_at = NOW() WHERE id = $1`,
+          [existingOrder.id, customerEmail]
+        );
+      }
       await client.query("COMMIT");
       return {
         orderId: existingOrder.id,
-        alreadyPaid: existingOrder.status === "paid",
+        alreadyPaid: isCapturedPaymentStatus(existingOrder.status),
         committedCommissionIds: []
       };
     }
 
     const orderId = randomUUID();
-    const committedCommissionIds = [];
-    for (const item of items) {
-      if (isCommissionOrderItem(item.productId)) {
-        committedCommissionIds.push(item.productId);
-      }
-    }
-
     if (columnSupport.hasShippingAmountColumns) {
       const columns = [
         "id",
@@ -659,19 +765,17 @@ async function createPaidOrderFromCheckoutSession(
       );
     }
 
+    if (columnSupport.hasCustomerEmailColumn && customerEmail) {
+      await client.query(
+        `UPDATE orders SET customer_email = $2, updated_at = NOW() WHERE id = $1`,
+        [orderId, customerEmail]
+      );
+    }
+
     const insertItemsQuery = buildInsertOrderItemsQuery(orderId, items);
     await client.query(insertItemsQuery.text, insertItemsQuery.values);
 
-    for (const commissionId of committedCommissionIds) {
-      await client.query(
-        `
-          UPDATE commissions
-          SET status = 'customer_committed', updated_at = NOW()
-          WHERE id = $1
-        `,
-        [commissionId]
-      );
-    }
+    const paidCommitments = await reconcileCommissionPayment(client, { orderId });
 
     await consumeReservationForOrder(client, {
       orderId,
@@ -682,7 +786,7 @@ async function createPaidOrderFromCheckoutSession(
     return {
       orderId,
       alreadyPaid: false,
-      committedCommissionIds
+      committedCommissionIds: paidCommitments
     };
   } catch (error) {
     await client.query("ROLLBACK");
@@ -704,11 +808,12 @@ async function markOrderPaidAndDecrementInventory(
     amountTax,
     amountTotal,
     shippingMethod,
-    shippingDetails
+    shippingDetails,
+    customerEmail
   }
 ) {
-  const client = await pool.connect();
   const columnSupport = await getOrderColumnSupport(pool);
+  const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
@@ -728,7 +833,13 @@ async function markOrderPaidAndDecrementInventory(
     }
 
     const order = orderResult.rows[0];
-    if (order.status === "paid") {
+    if (isCapturedPaymentStatus(order.status)) {
+      if (columnSupport.hasCustomerEmailColumn && customerEmail) {
+        await client.query(
+          `UPDATE orders SET customer_email = COALESCE(customer_email, $2), updated_at = NOW() WHERE id = $1`,
+          [orderId, customerEmail]
+        );
+      }
       await client.query("COMMIT");
       return {
         orderId,
@@ -755,14 +866,6 @@ async function markOrderPaidAndDecrementInventory(
 
     if (itemsResult.rowCount === 0) {
       throw withStatusError("Order has no items", 409);
-    }
-
-    const committedCommissionIds = [];
-
-    for (const item of itemsResult.rows) {
-      if (isCommissionOrderItem(item.product_id)) {
-        committedCommissionIds.push(item.product_id);
-      }
     }
 
     if (columnSupport.hasShippingAmountColumns) {
@@ -831,16 +934,14 @@ async function markOrderPaidAndDecrementInventory(
       );
     }
 
-    for (const commissionId of committedCommissionIds) {
+    if (columnSupport.hasCustomerEmailColumn && customerEmail) {
       await client.query(
-        `
-          UPDATE commissions
-          SET status = 'customer_committed', updated_at = NOW()
-          WHERE id = $1
-        `,
-        [commissionId]
+        `UPDATE orders SET customer_email = $2, updated_at = NOW() WHERE id = $1`,
+        [orderId, customerEmail]
       );
     }
+
+    const paidCommitments = await reconcileCommissionPayment(client, { orderId });
 
     await consumeReservationForOrder(client, {
       orderId,
@@ -851,7 +952,7 @@ async function markOrderPaidAndDecrementInventory(
     return {
       orderId,
       alreadyPaid: false,
-      committedCommissionIds
+      committedCommissionIds: paidCommitments
     };
   } catch (error) {
     await client.query("ROLLBACK");
@@ -859,6 +960,18 @@ async function markOrderPaidAndDecrementInventory(
   } finally {
     client.release();
   }
+}
+
+function isCapturedPaymentStatus(status) {
+  return [
+    "paid",
+    "scheduled",
+    "in_production",
+    "ready_to_ship",
+    "shipped",
+    "delivered",
+    "created"
+  ].includes(status);
 }
 
 module.exports = {

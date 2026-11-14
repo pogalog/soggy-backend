@@ -8,6 +8,7 @@ const {
   getOrderRecordByStripeCheckoutSessionId,
   markOrderCheckoutCancelled
 } = require("../models/orderModel");
+const { getOrderDigitalSummary } = require("../models/digitalFulfillmentModel");
 
 function extractCheckoutShippingDetails(session) {
   const shippingDetails =
@@ -244,14 +245,15 @@ function extractMarketPickupDetails(session, customerName) {
   };
 }
 
-function toOrderLookupResponse(order, session) {
+function toOrderLookupResponse(order, session, digitalDownloads = []) {
   const { stripeCheckoutSessionId, ...publicOrder } = order;
   return {
     ...publicOrder,
     shippingMethod: resolveShippingMethod(session, order),
     shippingAmount: resolveShippingAmount(session, order),
     shippingDetails: resolveShippingDetails(session, order),
-    taxSummary: buildTaxSummary(session, order)
+    taxSummary: buildTaxSummary(session, order),
+    digitalDownloads
   };
 }
 
@@ -362,8 +364,13 @@ function createOrderHandler({ getPool }) {
           return res.status(404).json({ error: "Order not found" });
         }
 
-        const stripeSession = await loadStripeSession(order);
-        return res.status(200).json(toOrderLookupResponse(order, stripeSession));
+        const [stripeSession, digitalDownloads] = await Promise.all([
+          loadStripeSession(order),
+          getOrderDigitalSummary(pool, order.id)
+        ]);
+        return res
+          .status(200)
+          .json(toOrderLookupResponse(order, stripeSession, digitalDownloads));
       }
 
       if (req.method === "POST") {

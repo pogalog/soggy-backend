@@ -3,9 +3,11 @@
 const { Buffer } = require("node:buffer");
 const { randomUUID } = require("node:crypto");
 const { env } = require("../config/env");
+const { requestCarrierJson } = require("./carrierHttp");
 
 let cachedAccessToken = null;
 let cachedAccessTokenExpiresAt = 0;
+let accessTokenPromise = null;
 
 function withStatusError(message, statusCode) {
   const error = new Error(message);
@@ -29,123 +31,129 @@ function buildBasicAuthHeader() {
   return `Basic ${encoded}`;
 }
 
-async function readResponsePayload(response) {
-  const text = await response.text().catch(() => "");
-  if (!text) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-async function fetchWithTimeout(url, init, timeoutMs) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(url, {
-      ...init,
-      signal: controller.signal
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
-      throw withStatusError("UPS request timed out", 504);
-    }
-
-    const wrappedError = withStatusError("UPS request failed", 502);
-    wrappedError.cause = error;
-    throw wrappedError;
-  } finally {
-    clearTimeout(timeoutId);
-  }
-}
-
 async function getUpsAccessToken() {
   if (cachedAccessToken && Date.now() < cachedAccessTokenExpiresAt - 60_000) {
     return cachedAccessToken;
   }
 
-  const response = await fetchWithTimeout(
-    `${requireString(env.upsBaseUrl, "UPS_BASE_URL").replace(/\/+$/, "")}/security/v1/oauth/token`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: buildBasicAuthHeader(),
-        Accept: "application/json",
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: "grant_type=client_credentials"
-    },
-    env.upsTimeoutMs
-  );
+  if (!accessTokenPromise) {
+    accessTokenPromise = (async () => {
+      const response = await requestCarrierJson({
+        carrier: "UPS",
+        phase: "oauth",
+        url: `${requireString(env.upsBaseUrl, "UPS_BASE_URL").replace(/\/+$/, "")}/security/v1/oauth/token`,
+        init: {
+          method: "POST",
+          headers: {
+            Authorization: buildBasicAuthHeader(),
+            Accept: "application/json",
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body: "grant_type=client_credentials"
+        },
+        timeoutMs: env.upsTimeoutMs
+      });
 
-  const payload = await readResponsePayload(response);
-  if (!response.ok || !payload || typeof payload !== "object") {
-    throw withStatusError(
-      `UPS token request failed with status ${response.status}`,
-      502
-    );
+      const payload = response.payload;
+      if (!response.ok || !payload || typeof payload !== "object") {
+        const error = withStatusError(
+          `UPS token request failed with status ${response.status}`,
+          502
+        );
+        error.carrier = "UPS";
+        error.phase = "oauth";
+        error.upstreamStatus = response.status;
+        throw error;
+      }
+
+      if (typeof payload.access_token !== "string" || !payload.access_token.trim()) {
+        throw withStatusError("UPS token response did not include an access token", 502);
+      }
+
+      const expiresInSeconds = Number(payload.expires_in);
+      cachedAccessToken = payload.access_token.trim();
+      cachedAccessTokenExpiresAt =
+        Date.now() + (Number.isFinite(expiresInSeconds) ? expiresInSeconds : 3600) * 1000;
+
+      return cachedAccessToken;
+    })();
   }
 
-  if (typeof payload.access_token !== "string" || !payload.access_token.trim()) {
-    throw withStatusError("UPS token response did not include an access token", 502);
+  const pendingToken = accessTokenPromise;
+  try {
+    return await pendingToken;
+  } finally {
+    if (accessTokenPromise === pendingToken) {
+      accessTokenPromise = null;
+    }
   }
-
-  const expiresInSeconds = Number(payload.expires_in);
-  cachedAccessToken = payload.access_token.trim();
-  cachedAccessTokenExpiresAt =
-    Date.now() + (Number.isFinite(expiresInSeconds) ? expiresInSeconds : 3600) * 1000;
-
-  return cachedAccessToken;
 }
 
 async function requestUpsShopRates(rateRequest) {
-  const token = await getUpsAccessToken();
-  const response = await fetchWithTimeout(
-    `${requireString(env.upsBaseUrl, "UPS_BASE_URL").replace(/\/+$/, "")}/api/rating/${requireString(
-      env.upsRateVersion,
-      "UPS_RATE_VERSION"
-    )}/Shop?additionalinfo=timeintransit`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        transId: randomUUID().replace(/-/g, "").slice(0, 32),
-        transactionSrc: "soggy-stitches"
+  for (let authAttempt = 1; authAttempt <= 2; authAttempt += 1) {
+    const token = await getUpsAccessToken();
+    const response = await requestCarrierJson({
+      carrier: "UPS",
+      phase: "rating",
+      url: `${requireString(env.upsBaseUrl, "UPS_BASE_URL").replace(/\/+$/, "")}/api/rating/${requireString(
+        env.upsRateVersion,
+        "UPS_RATE_VERSION"
+      )}/Shop?additionalinfo=timeintransit`,
+      init: {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          transId: randomUUID().replace(/-/g, "").slice(0, 32),
+          transactionSrc: "soggy-stitches"
+        },
+        body: JSON.stringify(rateRequest)
       },
-      body: JSON.stringify(rateRequest)
-    },
-    env.upsTimeoutMs
-  );
+      timeoutMs: env.upsTimeoutMs
+    });
 
-  const payload = await readResponsePayload(response);
-  if (response.ok) {
-    return payload;
+    const payload = response.payload;
+    if (response.ok) {
+      return payload;
+    }
+
+    if ((response.status === 401 || response.status === 403) && authAttempt === 1) {
+      if (cachedAccessToken === token) {
+        cachedAccessToken = null;
+        cachedAccessTokenExpiresAt = 0;
+      }
+      console.warn("UPS access token rejected; refreshing once", {
+        carrier: "UPS",
+        phase: "rating",
+        upstreamStatus: response.status
+      });
+      continue;
+    }
+
+    const errorMessage =
+      payload &&
+      typeof payload === "object" &&
+      payload.response &&
+      typeof payload.response === "object" &&
+      Array.isArray(payload.response.errors) &&
+      payload.response.errors[0] &&
+      typeof payload.response.errors[0].message === "string"
+        ? payload.response.errors[0].message
+        : `UPS rating request failed with status ${response.status}`;
+
+    const error = withStatusError(
+      errorMessage,
+      response.status === 400 || response.status === 422 ? 422 : 502
+    );
+    error.carrier = "UPS";
+    error.phase = "rating";
+    error.upstreamStatus = response.status;
+    error.details = payload;
+    throw error;
   }
 
-  const errorMessage =
-    payload &&
-    typeof payload === "object" &&
-    payload.response &&
-    typeof payload.response === "object" &&
-    Array.isArray(payload.response.errors) &&
-    payload.response.errors[0] &&
-    typeof payload.response.errors[0].message === "string"
-      ? payload.response.errors[0].message
-      : `UPS rating request failed with status ${response.status}`;
-
-  const error = withStatusError(
-    errorMessage,
-    response.status === 400 || response.status === 422 ? 422 : 502
-  );
-  error.details = payload;
-  throw error;
+  throw withStatusError("UPS authentication failed", 502);
 }
 
 module.exports = {

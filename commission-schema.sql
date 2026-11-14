@@ -13,6 +13,7 @@ create table if not exists commissions (
   time_cost                  integer,
   ship_date                  date,
   total_cost                 integer,
+  shipping_profile           jsonb,
   storage_bucket             text not null,
   upload_directory           text,
   storage_images             jsonb not null default '[]'::jsonb,

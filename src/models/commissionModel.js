@@ -1,4 +1,5 @@
 "use strict";
+const { COMMISSION_COMMERCE_SELECT, normalizeCommissionStatus } = require("../lib/commissionCommerce");
 
 const { randomBytes } = require("node:crypto");
 
@@ -224,28 +225,7 @@ async function updateCommissionStatusIfCurrent(
 
 async function getCommissionForFollowUp(pool, commissionId) {
   const result = await pool.query(
-    `
-      SELECT
-        id,
-        item_name,
-        item_description,
-        yarn_type,
-        yarn_color,
-        yarn_colors,
-        attachment_material_type,
-        status,
-        requires_commit,
-        commitment_deposit_amount,
-        time_cost,
-        ship_date,
-        total_cost,
-        storage_bucket,
-        meta_path,
-        created_at
-      FROM commissions
-      WHERE id = $1
-      LIMIT 1
-    `,
+    `${COMMISSION_COMMERCE_SELECT} WHERE c.id = $1`,
     [commissionId]
   );
 
@@ -262,7 +242,10 @@ async function getCommissionForFollowUp(pool, commissionId) {
     yarnColor: row.yarn_color,
     yarnColors: normalizeYarnColors(row.yarn_colors, row.yarn_color),
     attachmentMaterialType: row.attachment_material_type,
-    status: row.status,
+    status: normalizeCommissionStatus(row.status),
+    commitmentPaidCents: Number(row.commitment_paid_amount || 0),
+    finalOrderId: row.final_order_id || null,
+    shippingProfile: row.shipping_profile || null,
     requiresCommit: normalizeBoolean(row.requires_commit),
     commitmentDepositCents:
       row.commitment_deposit_amount === null || row.commitment_deposit_amount === undefined
@@ -288,27 +271,7 @@ async function getCommissionForFollowUp(pool, commissionId) {
 
 async function getCommissionById(pool, commissionId) {
   const result = await pool.query(
-    `
-      SELECT
-        id,
-        item_name,
-        item_description,
-        yarn_type,
-        yarn_color,
-        yarn_colors,
-        attachment_material_type,
-        status,
-        time_cost,
-        ship_date,
-        total_cost,
-        requires_commit,
-        commitment_deposit_amount,
-        created_at,
-        updated_at
-      FROM commissions
-      WHERE id = $1
-      LIMIT 1
-    `,
+    `${COMMISSION_COMMERCE_SELECT} WHERE c.id = $1`,
     [commissionId]
   );
 

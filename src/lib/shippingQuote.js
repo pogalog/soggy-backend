@@ -7,6 +7,7 @@ const {
   requestUspsBaseRate,
   requestUspsServiceStandards
 } = require("./uspsClient");
+const { requiresShipping } = require("./productCapabilities");
 
 const UPS_SERVICE_NAME_BY_CODE = {
   "01": "UPS Next Day Air",
@@ -191,7 +192,7 @@ function buildPackageSummary(productsById, cartItems) {
   for (const cartItem of cartItems) {
     const product = productsById.get(cartItem.productId);
     const productKind = cartItem.kind || product?.kind || null;
-    if (!product || productKind === "commission_commitment") {
+    if (!product || !requiresShipping(productKind)) {
       continue;
     }
 
@@ -319,7 +320,10 @@ function getTimePartsInZone(date, timeZone) {
 }
 
 function addDays(parts, days, timeZone) {
-  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+  // Use midday UTC so western time zones remain on the intended calendar date
+  // when converted back through Intl (midnight UTC would become the previous
+  // local day and can make the weekend-advance loop never progress).
+  const date = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, 12));
   date.setUTCDate(date.getUTCDate() + days);
   return getTimePartsInZone(date, timeZone);
 }
@@ -700,6 +704,14 @@ function chooseDefaultOption(options) {
 function summarizeProviderError(carrier, error) {
   return {
     carrier,
+    phase:
+      error && typeof error.phase === "string"
+        ? error.phase
+        : null,
+    upstreamStatus:
+      error && Number.isFinite(Number(error.upstreamStatus))
+        ? Number(error.upstreamStatus)
+        : null,
     statusCode:
       error && Number.isFinite(Number(error.statusCode))
         ? Number(error.statusCode)
@@ -715,6 +727,25 @@ function summarizeProviderError(carrier, error) {
         ? error.cause.message
         : null
   };
+}
+
+async function withProviderDeadline(carrier, quote) {
+  let timeoutId;
+  const deadline = new Promise((resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      const error = withStatusError(`${carrier} quote exceeded its deadline`, 504);
+      error.carrier = carrier;
+      error.phase = "provider-deadline";
+      error.retryable = true;
+      reject(error);
+    }, env.shippingProviderDeadlineMs);
+  });
+
+  try {
+    return await Promise.race([Promise.resolve().then(quote), deadline]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function quoteUpsShippingOptions({ shipFrom, shippingDetails, packageSummary }) {
@@ -944,7 +975,12 @@ async function quoteUspsShippingOptions({ shipFrom, shippingDetails, packageSumm
   return sortOptionsByPrice(options);
 }
 
-async function quoteShippingOptions({ productsById, cartItems, shippingDetails }) {
+async function quoteShippingOptions({
+  productsById,
+  cartItems,
+  shippingDetails,
+  carriers = ["UPS", "USPS"]
+}) {
   const packageSummary = buildPackageSummary(productsById, cartItems);
   if (!packageSummary) {
     return {
@@ -957,26 +993,31 @@ async function quoteShippingOptions({ productsById, cartItems, shippingDetails }
   }
 
   const shipFrom = parseShipFromAddressSecret();
+  const requestedCarriers = new Set(carriers);
   const providers = [
     {
       carrier: "UPS",
       quote: () =>
-        quoteUpsShippingOptions({
-          shipFrom,
-          shippingDetails,
-          packageSummary
-        })
+        withProviderDeadline("UPS", () =>
+          quoteUpsShippingOptions({
+            shipFrom,
+            shippingDetails,
+            packageSummary
+          })
+        )
     },
     {
       carrier: "USPS",
       quote: () =>
-        quoteUspsShippingOptions({
-          shipFrom,
-          shippingDetails,
-          packageSummary
-        })
+        withProviderDeadline("USPS", () =>
+          quoteUspsShippingOptions({
+            shipFrom,
+            shippingDetails,
+            packageSummary
+          })
+        )
     }
-  ];
+  ].filter((provider) => requestedCarriers.has(provider.carrier));
   const providerResults = await Promise.allSettled(
     providers.map((provider) => provider.quote())
   );
@@ -1001,6 +1042,7 @@ async function quoteShippingOptions({ productsById, cartItems, shippingDetails }
 
   if (options.length === 0) {
     if (errors[0]) {
+      errors[0].error.providerErrors = errors.map(({ error, ...summary }) => summary);
       throw errors[0].error;
     }
 
@@ -1061,7 +1103,9 @@ async function resolveSelectedShippingOption({
 }
 
 module.exports = {
+  buildPackageSummary,
   normalizeShippingDetailsInput,
   quoteShippingOptions,
-  resolveSelectedShippingOption
+  resolveSelectedShippingOption,
+  withProviderDeadline
 };

@@ -14,10 +14,18 @@ const {
   reserveWorkForCart
 } = require("../models/workQueueModel");
 const {
+  buildPackageSummary,
   normalizeShippingDetailsInput,
   resolveSelectedShippingOption
 } = require("../lib/shippingQuote");
+const { verifyShippingQuoteToken } = require("../lib/shippingQuoteToken");
 const { getStripeClient } = require("../lib/stripeClient");
+const {
+  consumesProductionCapacity,
+  hasFixedSingleQuantity,
+  isDigitalProduct,
+  requiresShipping: productRequiresShipping
+} = require("../lib/productCapabilities");
 
 function withStatusError(message, statusCode) {
   const error = new Error(message);
@@ -121,13 +129,16 @@ function normalizeCheckoutRequest(body) {
     typeof body.selectedShippingOptionId === "string"
       ? body.selectedShippingOptionId.trim()
       : "";
+  const shippingQuoteToken =
+    typeof body.shippingQuoteToken === "string" ? body.shippingQuoteToken.trim() : "";
 
   return {
     cartSessionId,
     channel,
     shippingMethod,
     shippingDetails,
-    selectedShippingOptionId: selectedShippingOptionId || null
+    selectedShippingOptionId: selectedShippingOptionId || null,
+    shippingQuoteToken: shippingQuoteToken || null
   };
 }
 
@@ -255,7 +266,17 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
       continue;
     }
 
-    if (product.kind === "commission_commitment" && cartItem.quantity > 1) {
+    if (isDigitalProduct(product) && product.hasDigitalAsset !== true) {
+      workLimitViolations.push({
+        lineId: cartItem.lineId || undefined,
+        productId: cartItem.productId,
+        variantId: cartItem.variantId || undefined,
+        reason: "DIGITAL_ASSET_NOT_READY"
+      });
+      continue;
+    }
+
+    if (hasFixedSingleQuantity(product) && cartItem.quantity > 1) {
       workLimitViolations.push({
         lineId: cartItem.lineId || undefined,
         productId: cartItem.productId,
@@ -266,12 +287,11 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
       });
     }
 
-    const workUnits =
-      product.kind === "commission_commitment"
-        ? 0
-        : Number(product.daysToCreate || 0) * cartItem.quantity;
+    const workUnits = consumesProductionCapacity(product)
+      ? Number(product.daysToCreate || 0) * cartItem.quantity
+      : 0;
 
-    if (product.kind !== "commission_commitment") {
+    if (consumesProductionCapacity(product)) {
       totalWorkDays += workUnits;
     }
 
@@ -286,7 +306,8 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
       unitAmount: Number(cartItem.unitAmount || 0),
       quantity: cartItem.quantity,
       stripeThumbUrl: product.stripeThumbUrl,
-      workUnits
+      workUnits,
+      productKind: product.kind
     });
   }
 
@@ -314,7 +335,7 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
       }
 
       const product = productsById.get(item.productId);
-      if (!product || product.kind === "commission_commitment") {
+      if (!product || !consumesProductionCapacity(product)) {
         continue;
       }
 
@@ -335,10 +356,15 @@ function buildPreparedOrderItems({ cartItems, productsById }) {
     const hasWorkLimit = workLimitViolations.some(
       (violation) => violation.reason === "EXCEEDS_MAX_CART_WORK_DAYS"
     );
+    const hasUnavailableDigitalAsset = workLimitViolations.some(
+      (violation) => violation.reason === "DIGITAL_ASSET_NOT_READY"
+    );
     const error = withStatusError(
       hasWorkLimit
         ? "This order exceeds the current four-day production limit"
-        : "One or more cart items exceed the per-item limit",
+        : hasUnavailableDigitalAsset
+          ? "One or more digital products are not ready for download"
+          : "One or more cart items exceed the per-item limit",
       422
     );
     error.details = workLimitViolations;
@@ -382,7 +408,8 @@ function buildStripeLineItems(items) {
         sku: String(item.sku),
         variant_id: item.variantId ? String(item.variantId) : "",
         variant_label: item.variantLabel ? String(item.variantLabel) : "",
-        option_summary: item.optionSummary ? String(item.optionSummary) : ""
+        option_summary: item.optionSummary ? String(item.optionSummary) : "",
+        product_kind: item.productKind ? String(item.productKind) : "repeatable"
       }
     };
 
@@ -559,6 +586,39 @@ function methodNotAllowed(res) {
   return res.status(405).json({ error: "Method not allowed" });
 }
 
+function doesCartRequireShipping({ shippingMethod, channel, items }) {
+  return (
+    shippingMethod === "shipping" &&
+    channel === "online" &&
+    items.some(
+      (item) => !item.validationReason && productRequiresShipping(item)
+    )
+  );
+}
+
+async function retirePreviousCommissionCheckouts(pool, stripe, items) {
+  const commissionItems = items.filter((item) => item.productKind === "commission_final" || item.productKind === "commission_commitment");
+  const ids = commissionItems.map((item) => item.productId);
+  if (!ids.length) return;
+  const existing = await pool.query(`
+    SELECT DISTINCT o.id, o.stripe_checkout_session_id, claim.expires_at
+    FROM commission_checkout_claims claim JOIN orders o ON o.id = claim.order_id
+    WHERE (claim.commission_id, claim.stage) IN (SELECT * FROM unnest($1::text[], $2::text[]))`, [ids, commissionItems.map((item) => item.productKind)]);
+  for (const order of existing.rows) {
+    if (!order.stripe_checkout_session_id) {
+      if (new Date(order.expires_at).getTime() <= Date.now()) continue;
+      throw withStatusError("A checkout is being prepared for this commission. Please retry shortly.", 409);
+    }
+    const session = await stripe.checkout.sessions.retrieve(order.stripe_checkout_session_id);
+    if (session.status === "complete") {
+      throw withStatusError("A payment for this commission is being processed. Please refresh the commission shortly.", 409);
+    }
+    if (session.status === "open") await stripe.checkout.sessions.expire(session.id);
+    // Delete only this attempt: another request may have already acquired a new claim.
+    await pool.query("DELETE FROM commission_checkout_claims WHERE order_id = $1", [order.id]);
+  }
+}
+
 function createCheckoutHandler({ getPool }) {
   return async function checkoutHandler(req, res) {
     let cartSessionId = null;
@@ -591,28 +651,35 @@ function createCheckoutHandler({ getPool }) {
         throw withStatusError("Local delivery checkout is not available yet", 422);
       }
 
-      const requiresShipping =
-        normalized.shippingMethod === "shipping" &&
-        normalized.channel === "online" &&
-        resolvedCartItems.some(
-          (item) => !item.validationReason && item.kind && item.kind !== "commission_commitment"
-        );
+      const cartRequiresShipping = doesCartRequireShipping({
+        shippingMethod: normalized.shippingMethod,
+        channel: normalized.channel,
+        items: resolvedCartItems
+      });
       let shippingQuote = null;
       let shippingDetails = null;
 
-      if (requiresShipping) {
+      if (cartRequiresShipping) {
         validateShippingDetailsForCheckout(normalized.shippingDetails);
         if (!normalized.selectedShippingOptionId) {
           throw withStatusError("selectedShippingOptionId is required", 400);
         }
 
         shippingDetails = normalized.shippingDetails;
-        const quoteResult = await resolveSelectedShippingOption({
-          productsById,
-          cartItems: resolvedCartItems,
-          shippingDetails,
-          selectedOptionId: normalized.selectedShippingOptionId
-        });
+        const quoteResult = normalized.shippingQuoteToken
+          ? verifyShippingQuoteToken({
+              token: normalized.shippingQuoteToken,
+              cartSessionId,
+              shippingDetails,
+              packageSummary: buildPackageSummary(productsById, resolvedCartItems),
+              selectedOptionId: normalized.selectedShippingOptionId
+            })
+          : await resolveSelectedShippingOption({
+              productsById,
+              cartItems: resolvedCartItems,
+              shippingDetails,
+              selectedOptionId: normalized.selectedShippingOptionId
+            });
         shippingQuote = quoteResult.selectedOption;
       } else if (normalized.shippingMethod === "market") {
         shippingDetails = await validateMarketPickupDetails(pool, normalized.shippingDetails);
@@ -622,6 +689,9 @@ function createCheckoutHandler({ getPool }) {
         cartSessionId,
         items: preparedItems
       });
+
+      const stripe = getStripeClient();
+      await retirePreviousCommissionCheckouts(pool, stripe, preparedItems);
 
       const pendingOrder = await createPendingOrder(pool, {
         cartSessionId,
@@ -641,12 +711,12 @@ function createCheckoutHandler({ getPool }) {
       });
 
       const appBaseUrl = requireAppBaseUrl();
-      const stripe = getStripeClient();
-      const customerId = requiresShipping
+      const customerId = cartRequiresShipping
         ? await createStripeCustomer(stripe, shippingDetails)
         : null;
       const sessionPayload = {
         mode: "payment",
+        expires_at: pendingOrder.checkoutExpiresAt,
         line_items: buildStripeLineItems(preparedItems),
         automatic_tax: { enabled: true },
         billing_address_collection: "required",
@@ -741,5 +811,6 @@ function createCheckoutHandler({ getPool }) {
 }
 
 module.exports = {
-  createCheckoutHandler
+  createCheckoutHandler,
+  doesCartRequireShipping
 };

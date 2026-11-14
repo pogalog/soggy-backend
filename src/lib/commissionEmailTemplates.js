@@ -527,7 +527,7 @@ function buildCommissionCommitEmail({ commission }) {
   };
 }
 
-function buildCommissionFinalizeEmail({ commission }) {
+function buildCommissionFinalizeEmail({ commission, images = [] }) {
   const rows = buildCommissionLifecycleRows(commission);
   const commissionUrl = `https://www.soggystitches.com/commission/${encodeURIComponent(
     commission.id
@@ -536,6 +536,11 @@ function buildCommissionFinalizeEmail({ commission }) {
   const bodyHtml = `
     <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">Your commission is finished and ready for final checkout.</p>
     <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:16px;line-height:1.75;">Please use the link below to review the completed commission and pay any remaining balance so we can prepare it for shipment.</p>
+    ${images.length ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:22px 0;border:1px solid ${theme.panelBorder};border-radius:18px;background:${theme.mutedPanel};"><tr><td style="padding:20px;text-align:center;">
+      <h2 style="margin:0 0 18px;color:${theme.textPrimary};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:21px;">Take a look at what we made for you!</h2>
+      ${images.map((image, index) => `<img src="cid:${escapeHtml(image.cid)}" alt="${escapeHtml(`Finished ${commission.itemName || "commission"}, photo ${index + 1}`)}" width="520" style="display:block;width:100%;max-width:520px;height:auto;margin:0 auto 14px;border-radius:12px;" />`).join("")}
+      <a href="${escapeHtml(commissionUrl)}" style="color:${theme.textMuted};">View your finished commission online</a>
+    </td></tr></table>` : ""}
     ${buildSectionLabel("Commission Details")}
     ${buildTable(rows)}
     <div style="margin-top:22px;padding:20px;background:
@@ -546,8 +551,16 @@ function buildCommissionFinalizeEmail({ commission }) {
       ${buildActionButton("Complete Final Checkout", commissionUrl)}
     </div>
     ${buildCenteredValueBlock({
-      label: "Total Cost",
+      label: "Item Subtotal",
       value: formatCurrencyFromCents(commission.totalCostCents)
+    })}
+    ${buildCenteredValueBlock({
+      label: "Commitment Already Paid",
+      value: formatCurrencyFromCents(commission.commitmentPaidCents || 0)
+    })}
+    ${buildCenteredValueBlock({
+      label: "Remaining Item Balance (plus shipping and tax at checkout)",
+      value: formatCurrencyFromCents(commission.totalCostCents - (commission.commitmentPaidCents || 0))
     })}
   `;
 

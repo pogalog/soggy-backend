@@ -13,7 +13,7 @@ const {
 } = require("../models/commissionModel");
 
 const ACTION_STATUS = {
-  commit: "customer_committed",
+  commit: "committed",
   cancel: "customer_cancelled"
 };
 
@@ -153,6 +153,12 @@ function resolveCurrentState(commission, action) {
     throw withStatusError("This commission has already been confirmed.", 409);
   }
 
+  if (commission.status !== "quoted") {
+    throw withStatusError("Only a quoted commission can be confirmed or cancelled here.", 409);
+  }
+  if (action === "commit" && commission.requiresCommit) {
+    throw withStatusError("Please complete checkout to pay the commitment deposit.", 409);
+  }
   return { mode: "update", targetStatus };
 }
 

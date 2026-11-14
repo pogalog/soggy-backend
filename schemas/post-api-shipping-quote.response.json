@@ -42,6 +42,7 @@
     }
   ],
   "defaultOptionId": "USPS:USPS_GROUND_ADVANTAGE",
+  "quoteToken": "<short-lived signed quote token>",
   "quote": {
     "optionId": "USPS:USPS_GROUND_ADVANTAGE",
     "carrier": "USPS",

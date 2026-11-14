@@ -19,6 +19,14 @@ create table if not exists product_images (
   id          bigserial primary key,
   product_id  text not null references products(id) on delete cascade,
   path        text not null,         -- e.g. 'products/prod_123/1.jpg'
+  original_path text,
+  thumbnail_path text,
+  source_width integer,
+  source_height integer,
+  framing jsonb not null default '{}'::jsonb,
+  renditions jsonb not null default '{}'::jsonb,
+  framing_revision integer not null default 0,
+  framing_updated_at timestamptz,
   alt         text,
   sort_order  integer not null default 0
 );

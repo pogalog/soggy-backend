@@ -142,11 +142,11 @@ ALTER TABLE products ADD CONSTRAINT products_status_check
 
 ALTER TABLE products DROP CONSTRAINT IF EXISTS products_product_kind_check;
 ALTER TABLE products ADD CONSTRAINT products_product_kind_check
-  CHECK (product_kind IN ('one_of_a_kind', 'repeatable', 'made_to_order', 'commission_template'));
+  CHECK (product_kind IN ('one_of_a_kind', 'repeatable', 'made_to_order', 'commission_template', 'digital'));
 
 ALTER TABLE products DROP CONSTRAINT IF EXISTS products_availability_mode_check;
 ALTER TABLE products ADD CONSTRAINT products_availability_mode_check
-  CHECK (availability_mode IN ('ready_to_ship', 'made_to_order', 'preorder', 'market_only'));
+  CHECK (availability_mode IN ('ready_to_ship', 'made_to_order', 'preorder', 'market_only', 'instant_download'));
 
 ALTER TABLE products DROP CONSTRAINT IF EXISTS products_base_price_cents_check;
 ALTER TABLE products ADD CONSTRAINT products_base_price_cents_check

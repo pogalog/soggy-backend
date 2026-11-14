@@ -11,5 +11,6 @@
     "postalCode": "30303",
     "country": "US"
   },
-  "selectedShippingOptionId": "USPS:USPS_GROUND_ADVANTAGE"
+  "selectedShippingOptionId": "USPS:USPS_GROUND_ADVANTAGE",
+  "shippingQuoteToken": "<quoteToken returned by POST /api/shipping/quote>"
 }

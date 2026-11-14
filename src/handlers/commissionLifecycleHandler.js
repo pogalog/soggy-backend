@@ -2,6 +2,8 @@
 
 const { env } = require("../config/env");
 const { sendMail } = require("../lib/mailer");
+const { deliverCommissionEmail } = require("../lib/commissionEmailDelivery");
+const { buildCommissionImageAttachments } = require("../lib/commissionMedia");
 const { fetchJsonFromGcs } = require("../lib/gcsJsonClient");
 const {
   buildCommissionCommitEmail,
@@ -136,6 +138,10 @@ function extractCustomerEmail(meta) {
 }
 
 function validateCommissionForAction(commission, action) {
+  const expectedStatus = action === "commit" ? "quoted" : "ready_to_ship";
+  if (commission.status !== expectedStatus) {
+    throw withStatusError(`Commission must be ${expectedStatus} before sending this email.`, 409);
+  }
   if (!commission.metaPath) {
     throw withStatusError("Commission is missing meta_path", 422);
   }
@@ -165,12 +171,12 @@ function methodNotAllowed(res) {
   return res.status(405).json({ error: "Method not allowed" });
 }
 
-function buildEmailMessage(action, commission) {
+function buildEmailMessage(action, commission, images) {
   if (action === "commit") {
     return buildCommissionCommitEmail({ commission });
   }
 
-  return buildCommissionFinalizeEmail({ commission });
+  return buildCommissionFinalizeEmail({ commission, images });
 }
 
 function buildSuccessMessage(action) {
@@ -221,21 +227,23 @@ function createCommissionLifecycleHandler({ getPool }) {
         objectPath: commission.metaPath
       });
       const customerEmail = extractCustomerEmail(meta);
-      const emailMessage = buildEmailMessage(action, commission);
+      const attachments = action === "finalize" ? await buildCommissionImageAttachments(pool, commissionId) : [];
+      const emailMessage = buildEmailMessage(action, commission, attachments);
 
-      await sendMail({
+      const delivery = await deliverCommissionEmail(pool, { commissionId, action, send: sendMail, message: {
         from: env.commissionFromEmail,
         to: customerEmail,
         replyTo: env.commissionFromEmail,
         subject: emailMessage.subject,
-        html: emailMessage.html
-      });
+        html: emailMessage.html,
+        ...(attachments.length ? { attachments } : {})
+      } });
 
       return res.status(200).json({
         ok: true,
         commissionId,
         customerEmail,
-        message: buildSuccessMessage(action)
+        message: delivery.alreadySent ? "This customer email was already sent." : buildSuccessMessage(action)
       });
     } catch (error) {
       if (error instanceof SyntaxError || error.type === "entity.parse.failed") {

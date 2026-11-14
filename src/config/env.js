@@ -84,8 +84,11 @@ function readCsvList(value, fallback) {
 }
 
 const env = {
+  gcpProjectId: process.env.GCP_PROJECT_ID,
   dbUser: process.env.DB_USER,
   dbPassword: process.env.DB_PASS,
+  dbIamAuth: readBoolean(process.env.DB_IAM_AUTH, false),
+  dbIamUser: process.env.DB_IAM_USER,
   dbName: process.env.DB_NAME,
   dbHost: process.env.DB_HOST,
   dbPort: readInt(process.env.DB_PORT, 5432),
@@ -94,11 +97,26 @@ const env = {
   dbSocketPath: process.env.DB_SOCKET_PATH || "/cloudsql",
   dbPoolMax: readInt(process.env.DB_POOL_MAX, 5),
   dbIdleTimeoutMs: readInt(process.env.DB_IDLE_TIMEOUT_MS, 30000),
-  dbConnectionTimeoutMs: readInt(process.env.DB_CONNECTION_TIMEOUT_MS, 10000),
+  // IAM authentication may need to mint a token and establish the connector's
+  // first socket on a newly scaled instance. Give that cold path a realistic
+  // budget while retaining the shorter legacy-password default.
+  dbConnectionTimeoutMs: readInt(
+    process.env.DB_CONNECTION_TIMEOUT_MS,
+    process.env.DB_IAM_AUTH === "true" ? 30000 : 10000
+  ),
   priceCurrency: process.env.PRICE_CURRENCY || "USD",
   maxCartQty: readPositiveInt(process.env.MAX_CART_QTY, 5),
   maxCartWorkDays: readPositiveNumber(process.env.MAX_CART_WORK_DAYS, 4),
   appBaseUrl: process.env.APP_BASE_URL,
+  digitalAssetsBucket:
+    process.env.DIGITAL_ASSETS_BUCKET || "soggy-digital-products",
+  digitalAccessDays: readPositiveInt(process.env.DIGITAL_ACCESS_DAYS, 30),
+  digitalDownloadLimit: readPositiveInt(process.env.DIGITAL_DOWNLOAD_LIMIT, 5),
+  digitalSignedUrlSeconds: readPositiveInt(
+    process.env.DIGITAL_SIGNED_URL_SECONDS,
+    120
+  ),
+  digitalAccessHashSalt: process.env.DIGITAL_ACCESS_HASH_SALT,
   stripeSecretKey: process.env.STRIPE_SECRET_KEY,
   stripeWebhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
   stripeTaxCode: process.env.STRIPE_TAX_CODE,
@@ -130,7 +148,7 @@ const env = {
     0.5,
     { min: 0, max: 4 }
   ),
-  upsTimeoutMs: readPositiveInt(process.env.UPS_TIMEOUT_MS, 12000),
+  upsTimeoutMs: readPositiveInt(process.env.UPS_TIMEOUT_MS, 6000),
   uspsConsumerKey: process.env.USPS_CONSUMER_KEY,
   uspsConsumerSecret: process.env.USPS_CONSUMER_SECRET,
   uspsBaseUrl: process.env.USPS_BASE_URL || "https://apis.usps.com",
@@ -148,7 +166,16 @@ const env = {
     "PRIORITY_MAIL",
     "PRIORITY_MAIL_EXPRESS"
   ]),
-  uspsTimeoutMs: readPositiveInt(process.env.USPS_TIMEOUT_MS, 12000),
+  uspsTimeoutMs: readPositiveInt(process.env.USPS_TIMEOUT_MS, 6000),
+  shippingQuoteSigningSecret: process.env.SHIPPING_QUOTE_SIGNING_SECRET,
+  shippingQuoteTtlSeconds: readPositiveInt(
+    process.env.SHIPPING_QUOTE_TTL_SECONDS,
+    1800
+  ),
+  shippingProviderDeadlineMs: readPositiveInt(
+    process.env.SHIPPING_PROVIDER_DEADLINE_MS,
+    7000
+  ),
   commissionGcsBucket:
     process.env.COMMISSION_GCS_BUCKET || "soggy-commission-requests",
   commissionFromEmail:
