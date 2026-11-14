@@ -3,4 +3,4 @@ alter table if exists orders
 
 alter table if exists orders
   add constraint orders_status_check
-  check (status in ('pending_payment', 'checkout_cancelled', 'paid', 'canceled'));
+  check (status in ('pending_payment', 'checkout_cancelled', 'paid', 'scheduled', 'in_production', 'ready_to_ship', 'shipped', 'created', 'canceled'));

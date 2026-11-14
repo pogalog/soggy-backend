@@ -5,6 +5,10 @@ const { getCartBySessionId } = require("../models/cartModel");
 const { getProductsForCheckoutByIds } = require("../models/productModel");
 const { reserveWorkForCart } = require("../models/workQueueModel");
 const { buildDisplayName, resolveCartLineItems } = require("../lib/cartLineResolver");
+const {
+  consumesProductionCapacity,
+  hasFixedSingleQuantity
+} = require("../lib/productCapabilities");
 
 function withStatusError(message, statusCode) {
   const error = new Error(message);
@@ -77,7 +81,7 @@ function buildReservationItems({ cartItems, productsById }) {
       continue;
     }
 
-    if (product.kind === "commission_commitment" && cartItem.quantity > 1) {
+    if (hasFixedSingleQuantity(product) && cartItem.quantity > 1) {
       workLimitViolations.push({
         lineId: cartItem.lineId || undefined,
         productId: cartItem.productId,
@@ -88,12 +92,11 @@ function buildReservationItems({ cartItems, productsById }) {
       });
     }
 
-    const workUnits =
-      product.kind === "commission_commitment"
-        ? 0
-        : Number(product.daysToCreate || 0) * cartItem.quantity;
+    const workUnits = consumesProductionCapacity(product)
+      ? Number(product.daysToCreate || 0) * cartItem.quantity
+      : 0;
 
-    if (!isCommissionOrderItem(product.id)) {
+    if (consumesProductionCapacity(product)) {
       totalWorkDays += workUnits;
     }
 
@@ -108,7 +111,8 @@ function buildReservationItems({ cartItems, productsById }) {
       unitAmount: Number(cartItem.unitAmount || 0),
       quantity: cartItem.quantity,
       stripeThumbUrl: product.stripeThumbUrl,
-      workUnits
+      workUnits,
+      productKind: product.kind
     });
   }
 

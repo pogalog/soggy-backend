@@ -89,7 +89,7 @@ function buildFooterHtml() {
           Reply & Contact
         </div>
         <div style="margin:0 0 8px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:14px;line-height:1.6;">
-          You can reply directly to this email if you need help with your order or shipping details.
+          You can reply directly to this email if you need help with your order or delivery details.
         </div>
       </div>
       <div style="margin-top:14px;color:${theme.textSubtle};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:12px;line-height:1.6;">
@@ -174,6 +174,17 @@ function isCommissionOrderItem(productId) {
 
 function isShippingLineItem(item) {
   return item && item.productId === FLAT_SHIPPING_PRODUCT_ID;
+}
+
+function isDigitalOrderItem(item) {
+  return item && (item.productKind === "digital" || item.kind === "digital");
+}
+
+function isDigitalOnlyOrder(order) {
+  const items = Array.isArray(order && order.items)
+    ? order.items.filter((item) => !isShippingLineItem(item))
+    : [];
+  return items.length > 0 && items.every(isDigitalOrderItem);
 }
 
 function buildItemUrl(productId) {
@@ -394,13 +405,20 @@ function buildCostBreakdownHtml({ order, shippingAmount, taxSummary }) {
     taxSummary && Number.isFinite(Number(taxSummary.amount))
       ? Number(taxSummary.amount)
       : Number(order.taxAmount || 0);
+  const digitalOnly = isDigitalOnlyOrder(order);
 
   return buildTable([
     buildDetailRow("Items subtotal", formatMoney(itemSubtotal, currency)),
     buildDetailRow(
-      isMarketPickupMethod(order && order.shippingMethod) ? "Market pickup" : "Shipping",
+      digitalOnly
+        ? "Digital delivery"
+        : isMarketPickupMethod(order && order.shippingMethod)
+          ? "Market pickup"
+          : "Shipping",
       resolvedShippingAmount > 0
         ? formatMoney(resolvedShippingAmount, currency)
+        : digitalOnly
+          ? "No charge"
         : isMarketPickupMethod(order && order.shippingMethod)
           ? "Free"
           : "Included"
@@ -527,13 +545,18 @@ function buildOrderConfirmationCustomerEmail({
   const companyName = escapeHtml(env.commissionCompanyName || "Soggy Stitches");
   const orderUrl = buildOrderUrl(order.id);
   const shipByDate = deriveShipByDate(order);
+  const digitalOnly = isDigitalOnlyOrder(order);
 
   const bodyHtml = `
     <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">
-      Thank you for your order. Your payment has been received, your order is confirmed, and we are getting it into our work queue.
+      ${digitalOnly
+        ? "Thank you for your order. Your payment has been received and your digital purchase is confirmed."
+        : "Thank you for your order. Your payment has been received, your order is confirmed, and we are getting it into our work queue."}
     </p>
     <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:16px;line-height:1.75;">
-      We will begin work on it and notify you once it ships. If you need to check back on the order later, keep the order ID below handy.
+      ${digitalOnly
+        ? "We are preparing your personalized PDF now. A separate email with your private download link will arrive as soon as it is ready."
+        : "We will begin work on it and notify you once it ships. If you need to check back on the order later, keep the order ID below handy."}
     </p>
     ${shipByDate ? `
       <p style="margin:0 0 18px 0;padding:14px 16px;border-radius:16px;background:rgba(215,178,74,0.10);border:1px solid rgba(215,178,74,0.28);color:${theme.goldSoft};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.65;">
@@ -563,14 +586,14 @@ function buildOrderConfirmationCustomerEmail({
       ${buildCostBreakdownHtml({ order, shippingAmount, taxSummary })}
     </div>
 
-    <div style="margin-top:22px;">
+    ${digitalOnly ? "" : `<div style="margin-top:22px;">
       ${buildSectionLabel(
         isMarketPickupMethod(deriveShippingMethod(order, shippingMethod, shippingAmount))
           ? "Pickup Information"
           : "Shipping Information"
       )}
       ${buildShippingInfoTable({ shippingDetails, shippingMethod, shippingAmount, order })}
-    </div>
+    </div>`}
 
     <div style="margin-top:22px;padding:20px;background:${theme.mutedPanel};border:1px solid ${theme.panelBorder};border-radius:18px;">
       ${buildSectionLabel("Need Anything Else?")}
@@ -601,10 +624,13 @@ function buildOrderConfirmationBusinessEmail({
   const companyName = escapeHtml(env.commissionCompanyName || "Soggy Stitches");
   const orderUrl = buildOrderUrl(order.id);
   const shipByDate = deriveShipByDate(order);
+  const digitalOnly = isDigitalOnlyOrder(order);
 
   const bodyHtml = `
     <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">
-      A paid order has been confirmed and scheduled into the production calendar.
+      ${digitalOnly
+        ? "A paid digital order has been confirmed and its personalized delivery is being prepared."
+        : "A paid order has been confirmed and scheduled into the production calendar."}
     </p>
     ${shipByDate ? `
       <p style="margin:0 0 18px 0;padding:14px 16px;border-radius:16px;background:rgba(215,178,74,0.10);border:1px solid rgba(215,178,74,0.28);color:${theme.goldSoft};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.65;">
@@ -632,7 +658,7 @@ function buildOrderConfirmationBusinessEmail({
     ${buildSectionLabel("Items")}
     ${buildOrderItemsHtml(order.items, order.currency)}
 
-    <div style="margin-top:22px;">
+    ${digitalOnly ? "" : `<div style="margin-top:22px;">
       ${buildSectionLabel("Cost Breakdown")}
       ${buildCostBreakdownHtml({ order, shippingAmount, taxSummary })}
     </div>
@@ -644,12 +670,14 @@ function buildOrderConfirmationBusinessEmail({
           : "Shipping Information"
       )}
       ${buildShippingInfoTable({ shippingDetails, shippingMethod, shippingAmount, order })}
-    </div>
+    </div>`}
 
     <div style="margin-top:22px;padding:20px;background:${theme.mutedPanel};border:1px solid ${theme.panelBorder};border-radius:18px;">
       ${buildSectionLabel("Admin Follow-Up")}
       <p style="margin:0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.75;">
-        Use the order page to review the customer-facing summary. Work scheduling details are available in the admin work queue.
+        ${digitalOnly
+          ? "Use the order workspace to review personalized-file delivery and customer access."
+          : "Use the order page to review the customer-facing summary. Work scheduling details are available in the admin work queue."}
       </p>
       ${buildActionButton("View Order", orderUrl)}
     </div>
@@ -664,7 +692,63 @@ function buildOrderConfirmationBusinessEmail({
   };
 }
 
+function buildDigitalDeliveryCustomerEmail({ orderId, downloads }) {
+  const companyName = escapeHtml(env.commissionCompanyName || "Soggy Stitches");
+  const downloadCards = downloads
+    .map(
+      (download) => `
+        <div style="margin:0 0 14px 0;padding:20px;background:${theme.mutedPanel};border:1px solid ${theme.panelBorder};border-radius:18px;">
+          <div style="color:${theme.textPrimary};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:18px;font-weight:700;line-height:1.4;">
+            ${escapeHtml(download.productName)}
+          </div>
+          <div style="margin-top:7px;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:14px;line-height:1.65;">
+            ${escapeHtml(download.assetLabel)} · Licensed copy ${escapeHtml(download.copyId)}
+          </div>
+          <div style="margin-top:5px;color:${theme.textSubtle};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:13px;line-height:1.65;">
+            Available until ${escapeHtml(
+              new Date(download.expiresAt).toLocaleDateString("en-US", {
+                year: "numeric",
+                month: "long",
+                day: "numeric",
+                timeZone: "UTC"
+              })
+            )} · Up to ${escapeHtml(download.downloadLimit)} download attempts
+          </div>
+          ${buildActionButton("Open Download", download.accessUrl)}
+        </div>
+      `
+    )
+    .join("");
+
+  const bodyHtml = `
+    <p style="margin:0 0 16px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:17px;line-height:1.75;">
+      Your personalized digital purchase is ready. Each PDF includes its licensed copy identifier, a Soggy Stitches copyright notice, and ${escapeHtml(
+        "www.soggystitches.com"
+      )}.
+    </p>
+    <p style="margin:0 0 22px 0;color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:15px;line-height:1.75;">
+      Keep this email for future access. These buttons open your private download page; please do not forward them.
+    </p>
+    ${buildSectionLabel("Your Downloads")}
+    ${downloadCards}
+    <div style="margin-top:22px;padding:18px 20px;border-radius:18px;background:rgba(215,178,74,0.08);border:1px solid rgba(215,178,74,0.22);color:${theme.textMuted};font-family:'Trebuchet MS','Segoe UI',Arial,sans-serif;font-size:14px;line-height:1.7;">
+      Order <span style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:${theme.goldSoft};">${escapeHtml(
+        orderId
+      )}</span>. If you reach the access limit or need the link extended, reply to this email and we can reset it.
+    </div>
+  `;
+
+  return {
+    subject: `${companyName}: Your downloads are ready`,
+    html: buildEmailShell({
+      title: "Your downloads are ready",
+      bodyHtml
+    })
+  };
+}
+
 module.exports = {
+  buildDigitalDeliveryCustomerEmail,
   buildOrderConfirmationBusinessEmail,
   buildOrderConfirmationCustomerEmail
 };

@@ -575,6 +575,7 @@ async function consumeReservationForOrder(client, { orderId, stripeCheckoutSessi
       SET
         ship_by_date = COALESCE(ship_by_date, $2::date),
         work_scheduled_at = COALESCE(work_scheduled_at, NOW()),
+        status = CASE WHEN status = 'paid' THEN 'scheduled' ELSE status END,
         updated_at = NOW()
       WHERE id = $1
     `,

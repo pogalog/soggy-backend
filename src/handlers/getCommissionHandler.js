@@ -1,6 +1,8 @@
 "use strict";
 
 const { getCommissionById } = require("../models/commissionModel");
+const { normalizeCommissionStatus } = require("../lib/commissionCommerce");
+const { listCustomerCommissionImages, customerImageResponse } = require("../lib/commissionMedia");
 
 function withStatusError(message, statusCode) {
   const error = new Error(message);
@@ -61,7 +63,9 @@ function mapCommissionResponse(commission) {
     yarn_color: commission.yarn_color,
     yarn_colors: Array.isArray(commission.yarn_colors) ? commission.yarn_colors : [],
     attachment_material_type: commission.attachment_material_type,
-    status: commission.status,
+    status: normalizeCommissionStatus(commission.status),
+    commitment_paid_amount: Number(commission.commitment_paid_amount || 0),
+    final_order_id: commission.final_order_id || null,
     time_cost: commission.time_cost,
     ship_date: toDateOnlyString(commission.ship_date),
     total_cost: commission.total_cost,
@@ -91,7 +95,8 @@ function createGetCommissionHandler({ getPool }) {
       }
 
       return res.status(200).json({
-        commission: mapCommissionResponse(commission)
+        commission: { ...mapCommissionResponse(commission),
+          product_images: (await listCustomerCommissionImages(pool, commissionId)).map(customerImageResponse) }
       });
     } catch (error) {
       const statusCode = Number.isInteger(error.statusCode) ? error.statusCode : 500;

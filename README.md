@@ -14,9 +14,39 @@ Run/deploy one HTTP function and route by path:
   - `GET|PUT|DELETE /cart/:sessionId`
 - Commission form: `POST /api/commission/form`
 - Order lookup: `GET /api/orders/:id`
+- Digital download access: `POST /api/digital-downloads`
 - Checkout: `POST /api/checkout/session`
 - Shipping quote: `POST /api/shipping/quote`
 - Stripe webhook: `POST /api/stripe/webhook`
+
+## Digital products
+
+Apply `sql-util/digital-assets-migration.sql` to the shared Postgres database
+before deploying either backend. A digital product uses `product_kind=digital`
+and `availability_mode=instant_download`; it does not consume production
+capacity, require shipping, or allow a cart quantity above one.
+
+The admin uploads a static, unencrypted PDF to the private
+`DIGITAL_ASSETS_BUCKET`. After Stripe confirms payment, the backend creates a
+purchase entitlement and a personalized PDF. The generated copy includes a
+license page and optional page footer with a masked purchaser identity, copy
+ID, order reference, Soggy Stitches copyright notice, and
+`www.soggystitches.com`.
+
+Customer access uses a random token in the URL fragment, a POST authorization
+request, and a short-lived GCS signed URL. Configure:
+
+- `GCP_PROJECT_ID`
+- `DIGITAL_ASSETS_BUCKET` (defaults to `soggy-digital-products`)
+- `DIGITAL_ACCESS_DAYS` (defaults to 30)
+- `DIGITAL_DOWNLOAD_LIMIT` (defaults to 5)
+- `DIGITAL_SIGNED_URL_SECONDS` (defaults to 120)
+- `DIGITAL_ACCESS_HASH_SALT` (Secret Manager; used to HMAC access IPs)
+
+Keep the bucket private. The storefront backend service account needs object
+read/write access to this bucket and permission to sign blobs for GCS V4 URLs.
+The admin backend service account needs object read/write access for master PDF
+uploads. Do not grant public object access.
 
 Legacy exports `getProduct` and `cartService` still exist, but both now point to the same routed handler.
 
@@ -134,8 +164,11 @@ Behavior notes:
 
 - Reads cart items and product shipping dimensions/weight from Postgres.
 - Packs the cart into a single estimated shipment using a soft-goods compression heuristic.
-- Calls the UPS OAuth token endpoint with `UPS_CLIENT_ID` + `UPS_CLIENT_SECRET`.
-- Calls the UPS Rating `Shop` endpoint and returns only the cheapest valid option.
+- Accepts an optional `carriers` array (`UPS`, `USPS`, or both), allowing the storefront to request and render each courier independently.
+- Calls UPS and USPS concurrently and continues with either carrier when the other is unavailable.
+- Deduplicates OAuth refreshes, retries transient carrier responses, and refreshes a rejected token once.
+- Bounds each carrier call (including response-body reads) and each provider's total quote time.
+- Returns a short-lived signed `quoteToken`; send it back with `selectedShippingOptionId` when creating Checkout so a second live carrier request is unnecessary.
 - Returns `shippingRequired: false` when the cart only contains non-shippable commission commitment items.
 
 ## Order lookup endpoint
@@ -364,8 +397,6 @@ Use the included script:
 PROJECT_ID="your-project-id" \
 REGION="us-central1" \
 ALLOW_UNAUTHENTICATED="true" \
-DB_USER_SECRET="DB_USER" \
-DB_PASS_SECRET="DB_PASS" \
 DB_NAME_SECRET="DB_NAME" \
 INSTANCE_CONNECTION_NAME_SECRET="INSTANCE_CONNECTION_NAME" \
 SMTP_PASS_SECRET="SMTP_PASS" \
@@ -376,8 +407,6 @@ STRIPE_WEBHOOK_SECRET_SECRET="STRIPE_WEBHOOK_SECRET" \
 
 By default, the script assumes these Secret Manager secret names match the environment variable names and uses the `latest` version:
 
-- `DB_USER`
-- `DB_PASS`
 - `DB_NAME`
 - `INSTANCE_CONNECTION_NAME`
 - `SMTP_PASS`
@@ -395,20 +424,31 @@ The deployed Cloud Function service account must have `roles/secretmanager.secre
 
 Stripe webhooks require the HTTP function to accept unauthenticated requests. In this repo's checked-in [`deploy-setup.sh`](/home/anaiah/soggy-cloud-functions/deploy-setup.sh), `ALLOW_UNAUTHENTICATED=true` is enabled so Stripe can reach `/api/stripe/webhook`.
 
-If you use direct TCP instead of Cloud SQL sockets, set `DB_HOST` (and optional `DB_PORT`); in that mode the deploy script will skip `INSTANCE_CONNECTION_NAME`.
+For the default IAM deployment, the script reads `INSTANCE_CONNECTION_NAME` at deploy time and passes it as ordinary runtime configuration for the Cloud SQL connector. If you use direct TCP instead, set `DB_HOST` (and optional `DB_PORT`).
 
 To deploy the unified API service, set `ENTRY_POINT=api` (recommended). Existing `getProduct` and `cartService` entry points are aliases to the same routed handler.
 
 ## Notes
 
 - Currency in the response defaults to `USD` and can be changed with `PRICE_CURRENCY`.
-- DB auth is currently password-based, but deploys now inject `DB_USER`, `DB_PASS`, `DB_NAME`, and `INSTANCE_CONNECTION_NAME` from Secret Manager.
+- Production deploys use Cloud SQL IAM database authentication by default. The
+  runtime identity is `soggy-backend@PROJECT_ID.iam.gserviceaccount.com`; it
+  needs Cloud SQL Client, Cloud SQL Instance User, and database privileges for
+  its IAM database user. The app uses the Cloud SQL Node.js Connector over
+  private IP and does not receive `DB_USER` or `DB_PASS`.
+- The deploy reads `INSTANCE_CONNECTION_NAME` from Secret Manager and injects
+  it as non-secret runtime configuration. It injects `DB_NAME` and the
+  application secrets from Secret Manager. Set `DB_IAM_AUTH=false` only for a
+  deliberate password-authentication rollback; that mode restores the
+  `DB_USER` and `DB_PASS` secret mappings.
 - Stripe Checkout requires `APP_BASE_URL`, `STRIPE_SECRET_KEY`, and `STRIPE_WEBHOOK_SECRET`.
 - The deploy script injects `STRIPE_SECRET_KEY` and `STRIPE_WEBHOOK_SECRET` from Secret Manager.
 - `STRIPE_TAX_CODE` is optional. If set, it is sent on each Checkout line item as `price_data.product_data.tax_code`.
 - `STRIPE_SHIPPING_ALLOWED_COUNTRIES` controls which checkout destinations are supported. It defaults to `US`.
 - `STRIPE_SHIPPING_TAX_CODE` defaults to Stripe's standard shipping tax code (`txcd_92010001`) and applies to the generated shipping rate.
-- UPS checkout shipping requires `UPS_CLIENT_ID`, `UPS_CLIENT_SECRET`, `UPS_SHIPPER_NUMBER`, and `SHIP_FROM_ADDRESS`.
+- Carrier checkout shipping requires the UPS/USPS credentials, `SHIP_FROM_ADDRESS`, and a Secret Manager value named `SHIPPING_QUOTE_SIGNING_SECRET` containing at least 32 random characters.
+- `SHIPPING_QUOTE_TTL_SECONDS` defaults to 1800 seconds. Carrier calls default to 6000ms and `SHIPPING_PROVIDER_DEADLINE_MS` defaults to 7000ms, below the storefront proxy's shipping-specific 10000ms deadline.
+- Cloud SQL uses a small `db-f1-micro` instance in production. Keep `DB_POOL_MAX` at 2 and cap the Gen 2 function with `MAX_INSTANCE_COUNT=8` (the deployment defaults) unless the database tier is increased first. The IAM connector needs a 512 MiB function memory limit.
 - `SHIP_FROM_ADDRESS` should be stored as JSON in Secret Manager and include the ship-from name plus line1/city/state/postalCode/country.
 - `UPS_CUSTOMER_CLASSIFICATION` defaults to `04` for retail-location pricing, and `UPS_PICKUP_TYPE` defaults to `03` for counter drop-off style rating. Keep both configurable because a future account-billed label-purchase flow may need different values.
 - The quote packer assumes soft goods and compresses height by `UPS_COMPRESSION_RATIO` (default `0.8`) with `UPS_PACKAGE_PADDING_INCHES` (default `0.5`) added back for a safer carton estimate.

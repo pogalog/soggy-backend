@@ -15,10 +15,14 @@ const { createWorkEstimateHandler } = require("./src/handlers/workEstimateHandle
 const { createWorkReservationHandler } = require("./src/handlers/workReservationHandler");
 const { createShippingQuoteHandler } = require("./src/handlers/shippingQuoteHandler");
 const { createStripeWebhookHandler } = require("./src/handlers/stripeWebhookHandler");
+const {
+  createDigitalDownloadHandler
+} = require("./src/handlers/digitalDownloadHandler");
 const { createMarketHandler } = require("./src/handlers/marketHandler");
 const { createSiteContentHandler } = require("./src/handlers/siteContentHandler");
 const { createApiHandler } = require("./src/handlers/apiHandler");
 const { getPool } = require("./src/db/pool");
+const { createCommissionImageHandler } = require("./src/handlers/commissionImageHandler");
 
 const commissionDetailsHandler = createGetCommissionHandler({ getPool });
 const productHandler = createGetProductHandler({ getPool });
@@ -33,9 +37,11 @@ const workEstimateHandler = createWorkEstimateHandler({ getPool });
 const workReservationHandler = createWorkReservationHandler({ getPool });
 const shippingQuoteHandler = createShippingQuoteHandler({ getPool });
 const stripeWebhookHandler = createStripeWebhookHandler({ getPool });
+const digitalDownloadHandler = createDigitalDownloadHandler({ getPool });
 const marketHandler = createMarketHandler({ getPool });
 const siteContentHandler = createSiteContentHandler({ getPool });
 const api = createApiHandler({
+  commissionImageHandler: createCommissionImageHandler({ getPool }),
   productHandler,
   productCatalogHandler,
   commissionDetailsHandler,
@@ -48,6 +54,7 @@ const api = createApiHandler({
   workEstimateHandler,
   workReservationHandler,
   shippingQuoteHandler,
+  digitalDownloadHandler,
   stripeWebhookHandler,
   marketHandler,
   siteContentHandler

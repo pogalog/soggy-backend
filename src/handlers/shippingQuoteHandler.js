@@ -7,6 +7,7 @@ const {
   normalizeShippingDetailsInput,
   quoteShippingOptions
 } = require("../lib/shippingQuote");
+const { createShippingQuoteToken } = require("../lib/shippingQuoteToken");
 
 function withStatusError(message, statusCode) {
   const error = new Error(message);
@@ -51,6 +52,29 @@ function parseJsonBody(req) {
   throw new Error("Unsupported request body format");
 }
 
+function normalizeRequestedCarriers(value) {
+  if (value === undefined || value === null) {
+    return ["UPS", "USPS"];
+  }
+
+  if (!Array.isArray(value) || value.length === 0) {
+    throw withStatusError("carriers must be a non-empty array", 400);
+  }
+
+  const carriers = Array.from(
+    new Set(
+      value.map((carrier) =>
+        typeof carrier === "string" ? carrier.trim().toUpperCase() : ""
+      )
+    )
+  );
+  if (carriers.some((carrier) => carrier !== "UPS" && carrier !== "USPS")) {
+    throw withStatusError("carriers may only contain UPS or USPS", 400);
+  }
+
+  return carriers;
+}
+
 function normalizeRequest(body) {
   if (!body || typeof body !== "object") {
     throw withStatusError("Request body must be a JSON object", 400);
@@ -64,6 +88,7 @@ function normalizeRequest(body) {
 
   return {
     cartSessionId,
+    carriers: normalizeRequestedCarriers(body.carriers),
     shippingDetails: normalizeShippingDetailsInput(body.shippingDetails, {
       requireName: false
     })
@@ -101,6 +126,8 @@ function ensureResolvedCartLines(cartItems) {
 function createShippingQuoteHandler({ getPool }) {
   return async function shippingQuoteHandler(req, res) {
     let cartSessionId = null;
+    let requestedCarriers = null;
+    const startedAt = Date.now();
 
     try {
       if (req.method !== "POST") {
@@ -111,6 +138,7 @@ function createShippingQuoteHandler({ getPool }) {
       const body = parseJsonBody(req);
       const normalized = normalizeRequest(body);
       cartSessionId = normalized.cartSessionId;
+      requestedCarriers = normalized.carriers;
 
       const pool = getPool();
       const cart = await getCartBySessionId(pool, cartSessionId);
@@ -125,8 +153,31 @@ function createShippingQuoteHandler({ getPool }) {
       const quoteResult = await quoteShippingOptions({
         productsById,
         cartItems: resolvedItems,
-        shippingDetails: normalized.shippingDetails
+        shippingDetails: normalized.shippingDetails,
+        carriers: normalized.carriers
       });
+
+      if (quoteResult.shippingRequired) {
+        quoteResult.quoteToken = createShippingQuoteToken({
+          cartSessionId,
+          shippingDetails: normalized.shippingDetails,
+          packageSummary: quoteResult.packageSummary,
+          options: quoteResult.options
+        });
+      }
+
+      if (Array.isArray(quoteResult.providerWarnings) && quoteResult.providerWarnings.length > 0) {
+        console.warn("Shipping quote completed with reduced carrier coverage", {
+          cartSessionId,
+          requestedCarriers,
+          durationMs: Date.now() - startedAt,
+          optionCount: quoteResult.options.length,
+          availableCarriers: Array.from(
+            new Set(quoteResult.options.map((option) => option.carrier))
+          ),
+          providerWarnings: quoteResult.providerWarnings
+        });
+      }
 
       return res.status(200).json(quoteResult);
     } catch (error) {
@@ -151,8 +202,18 @@ function createShippingQuoteHandler({ getPool }) {
           method: req.method,
           path: req.path || req.url,
           cartSessionId,
+          requestedCarriers,
+          durationMs: Date.now() - startedAt,
           message: error.message,
           cause: error.cause instanceof Error ? error.cause.message : undefined,
+          carrier: typeof error.carrier === "string" ? error.carrier : undefined,
+          phase: typeof error.phase === "string" ? error.phase : undefined,
+          upstreamStatus: Number.isFinite(Number(error.upstreamStatus))
+            ? Number(error.upstreamStatus)
+            : undefined,
+          providerErrors: Array.isArray(error.providerErrors)
+            ? error.providerErrors
+            : undefined,
           statusCode
         });
       } else {
@@ -170,5 +231,6 @@ function createShippingQuoteHandler({ getPool }) {
 }
 
 module.exports = {
-  createShippingQuoteHandler
+  createShippingQuoteHandler,
+  normalizeRequestedCarriers
 };

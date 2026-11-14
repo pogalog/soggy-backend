@@ -4,9 +4,21 @@ const METADATA_TOKEN_URL =
   "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 
 const IMAGE_NAME_PATTERN = /\.(avif|gif|jpe?g|png|webp)$/i;
+const GCS_REQUEST_TIMEOUT_MS = 2_000;
 
 let cachedAccessToken = null;
 let accessTokenExpiresAt = 0;
+
+async function fetchWithTimeout(url, init = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), GCS_REQUEST_TIMEOUT_MS);
+
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 function readRequiredString(value, label) {
   const normalized = typeof value === "string" ? value.trim() : "";
@@ -34,7 +46,7 @@ async function getAccessToken() {
     return cachedAccessToken;
   }
 
-  const response = await fetch(METADATA_TOKEN_URL, {
+  const response = await fetchWithTimeout(METADATA_TOKEN_URL, {
     headers: {
       "Metadata-Flavor": "Google"
     }
@@ -74,7 +86,7 @@ async function listObjectNamesFromGcsPrefix({ bucketName, objectPrefix, maxResul
   url.searchParams.set("fields", "items/name");
   url.searchParams.set("maxResults", String(Math.max(1, Math.floor(maxResults))));
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url, {
     headers: {
       Authorization: `Bearer ${accessToken}`
     }

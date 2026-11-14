@@ -122,6 +122,16 @@ function isStripeWebhookRequest(req) {
   );
 }
 
+function isDigitalDownloadRequest(req) {
+  const path = normalizePath(req);
+  return (
+    path === "/digital-downloads" ||
+    path === "/digital-downloads/" ||
+    path === "/api/digital-downloads" ||
+    path === "/api/digital-downloads/"
+  );
+}
+
 function isCommissionFormRequest(req) {
   const path = normalizePath(req);
   return (
@@ -187,6 +197,7 @@ function isSiteContentRequest(req) {
 }
 
 function createApiHandler({
+  commissionImageHandler,
   productHandler,
   productCatalogHandler,
   commissionDetailsHandler,
@@ -196,6 +207,7 @@ function createApiHandler({
   workEstimateHandler,
   workReservationHandler,
   shippingQuoteHandler,
+  digitalDownloadHandler,
   stripeWebhookHandler,
   commissionResponseHandler,
   commissionLifecycleHandler,
@@ -237,6 +249,10 @@ function createApiHandler({
         return shippingQuoteHandler(req, res);
       }
 
+      if (digitalDownloadHandler && isDigitalDownloadRequest(req)) {
+        return digitalDownloadHandler(req, res);
+      }
+
       if (orderHandler && isOrderRequest(req)) {
         return orderHandler(req, res);
       }
@@ -247,6 +263,10 @@ function createApiHandler({
 
       if (siteContentHandler && isSiteContentRequest(req)) {
         return siteContentHandler(req, res);
+      }
+
+      if (commissionImageHandler && /^\/(api\/)?commissions\/images\/?$/.test(normalizePath(req))) {
+        return commissionImageHandler(req, res);
       }
 
       if (commissionDetailsHandler && isCommissionDetailsRequest(req)) {
@@ -267,7 +287,7 @@ function createApiHandler({
 
       return res.status(404).json({
         error:
-          "Route not found. Use /products/:id, /products/search, /products/filters, /products/featured-categories, /tags, /products/commissions, /markets, /cart/:sessionId, /commissions, /commissions/respond, /commissions/commit, /commission/finalize, /api/orders/:id, /api/shipping/quote, /api/work-estimates, /api/work-reservations, /api/checkout/session, or /api/stripe/webhook"
+          "Route not found. Use /products/:id, /products/search, /products/filters, /products/featured-categories, /tags, /products/commissions, /markets, /cart/:sessionId, /commissions, /commissions/respond, /commissions/commit, /commission/finalize, /api/orders/:id, /api/digital-downloads, /api/shipping/quote, /api/work-estimates, /api/work-reservations, /api/checkout/session, or /api/stripe/webhook"
       });
     } catch (error) {
       console.error("Unhandled API routing error", {

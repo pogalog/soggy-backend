@@ -5,6 +5,7 @@ const { getStripeClient } = require("../lib/stripeClient");
 const { sendMail } = require("../lib/mailer");
 const { fetchJsonFromGcs } = require("../lib/gcsJsonClient");
 const {
+  buildDigitalDeliveryCustomerEmail,
   buildOrderConfirmationBusinessEmail,
   buildOrderConfirmationCustomerEmail
 } = require("../lib/orderEmailTemplates");
@@ -13,6 +14,10 @@ const {
   buildCommissionCustomerDecisionCustomerEmail
 } = require("../lib/commissionEmailTemplates");
 const { getCommissionForFollowUp } = require("../models/commissionModel");
+const {
+  fulfillDigitalOrder,
+  recordDigitalDeliveryEmailResult
+} = require("../models/digitalFulfillmentModel");
 const {
   createPaidOrderFromCheckoutSession,
   getOrderById,
@@ -380,6 +385,7 @@ function normalizeCheckoutLineItem(lineItem) {
   const variantId = readProductMetadata(product, "variant_id");
   const variantLabel = readProductMetadata(product, "variant_label");
   const optionSummary = readProductMetadata(product, "option_summary");
+  const productKind = readProductMetadata(product, "product_kind") || "repeatable";
   const name =
     typeof lineItem.description === "string" && lineItem.description.trim()
       ? lineItem.description.trim()
@@ -415,7 +421,9 @@ function normalizeCheckoutLineItem(lineItem) {
     name,
     unitAmount,
     quantity,
-    stripeThumbUrl
+    stripeThumbUrl,
+    productKind,
+    workUnits: 0
   };
 }
 
@@ -470,7 +478,7 @@ async function notifyBusinessOfCommittedCommission(pool, commissionId) {
   const emailMessage = buildCommissionCustomerDecisionBusinessEmail({
     commission: {
       ...commission,
-      status: "customer_committed"
+      status: "committed"
     },
     action: "commit",
     customerEmail: customerEmail || "Not available"
@@ -478,7 +486,7 @@ async function notifyBusinessOfCommittedCommission(pool, commissionId) {
   const customerEmailMessage = buildCommissionCustomerDecisionCustomerEmail({
     commission: {
       ...commission,
-      status: "customer_committed"
+      status: "committed"
     },
     action: "commit"
   });
@@ -517,6 +525,8 @@ async function handleCheckoutSessionCompleted(pool, session) {
 
   let result;
   let resolvedOrderId = orderId;
+  const customerEmail = extractCheckoutCustomerEmail(session);
+  const customerName = extractCheckoutCustomerName(session);
   const existingOrder = resolvedOrderId ? await getOrderById(pool, resolvedOrderId) : null;
 
   if (resolvedOrderId) {
@@ -532,6 +542,7 @@ async function handleCheckoutSessionCompleted(pool, session) {
       amountTax: Number(session.total_details && session.total_details.amount_tax),
       amountTotal: Number(session.amount_total),
       shippingDetails: resolvedShippingDetails,
+      customerEmail,
       shippingMethod:
         existingOrder && typeof existingOrder.shippingMethod === "string"
           ? existingOrder.shippingMethod
@@ -562,13 +573,35 @@ async function handleCheckoutSessionCompleted(pool, session) {
       amountTax: Number(session.total_details && session.total_details.amount_tax),
       amountTotal: Number(session.amount_total),
       shippingMethod: resolveShippingMethod(session, null),
-      shippingDetails: resolvedShippingDetails
+      shippingDetails: resolvedShippingDetails,
+      customerEmail
     });
     resolvedOrderId = result.orderId;
   }
 
+  let digitalFulfillment = {
+    fulfilled: [],
+    failed: [],
+    skippedReason: null
+  };
+  let digitalFulfillmentError = null;
+  try {
+    digitalFulfillment = await fulfillDigitalOrder(pool, {
+      orderId: resolvedOrderId,
+      customerEmail,
+      customerName,
+      purchasedAt: session.created ? new Date(Number(session.created) * 1000) : new Date()
+    });
+  } catch (error) {
+    digitalFulfillmentError = error;
+    console.error("Failed to create digital entitlements", {
+      orderId: resolvedOrderId,
+      stripeCheckoutSessionId,
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+
   if (result && result.alreadyPaid === false) {
-    const customerEmail = extractCheckoutCustomerEmail(session);
     let orderForEmail = null;
     const loadOrderForEmail = async () => {
       if (orderForEmail) {
@@ -640,6 +673,48 @@ async function handleCheckoutSessionCompleted(pool, session) {
     }
   }
 
+  if (digitalFulfillment.fulfilled.length > 0 && customerEmail) {
+    try {
+      const emailMessage = buildDigitalDeliveryCustomerEmail({
+        orderId: resolvedOrderId,
+        downloads: digitalFulfillment.fulfilled
+      });
+      await sendMail({
+        from: env.commissionFromEmail,
+        to: customerEmail,
+        replyTo: env.commissionFromEmail,
+        subject: emailMessage.subject,
+        html: emailMessage.html
+      });
+      await recordDigitalDeliveryEmailResult(
+        pool,
+        digitalFulfillment.fulfilled,
+        { sent: true, recipient: customerEmail }
+      );
+    } catch (error) {
+      await recordDigitalDeliveryEmailResult(
+        pool,
+        digitalFulfillment.fulfilled,
+        { sent: false, recipient: customerEmail, error }
+      ).catch(() => undefined);
+      console.error("Failed to send digital delivery email", {
+        orderId: resolvedOrderId,
+        stripeCheckoutSessionId,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
+
+  if (digitalFulfillment.failed.length > 0) {
+    throw new Error(
+      `Digital fulfillment failed for ${digitalFulfillment.failed.length} file(s)`
+    );
+  }
+  if (digitalFulfillmentError) {
+    throw digitalFulfillmentError;
+  }
+
   if (
     result &&
     result.alreadyPaid === false &&
@@ -654,7 +729,7 @@ async function handleCheckoutSessionCompleted(pool, session) {
   return result;
 }
 
-function createStripeWebhookHandler({ getPool }) {
+function createStripeWebhookHandler({ getPool, reconcileCheckout = handleCheckoutSessionCompleted }) {
   return async function stripeWebhookHandler(req, res) {
     try {
       if (req.method !== "POST") {
@@ -681,10 +756,15 @@ function createStripeWebhookHandler({ getPool }) {
 
       switch (event.type) {
         case "checkout.session.completed":
-          processingResult = await handleCheckoutSessionCompleted(pool, event.data.object);
+        case "checkout.session.async_payment_succeeded":
+          if (["paid", "no_payment_required"].includes(event.data.object.payment_status)) {
+            processingResult = await reconcileCheckout(pool, event.data.object);
+          }
           break;
         case "checkout.session.async_payment_failed":
-          // TODO: mark order payment failed and release reservations (if reservation is added).
+          await pool.query(`DELETE FROM commission_checkout_claims
+            WHERE order_id IN (SELECT id FROM orders WHERE stripe_checkout_session_id = $1
+              AND status IN ('pending_payment', 'checkout_cancelled'))`, [event.data.object.id]);
           break;
         case "charge.refunded":
           // TODO: add refund handling and inventory reconciliation policy.

@@ -2,41 +2,7 @@
 
 const { env } = require("../config/env");
 const { findFirstImageUrlInGcsPrefix } = require("../lib/gcsObjectClient");
-
-const COMMISSION_PRODUCT_BY_ID_SQL = `
-  SELECT
-    id,
-    item_name,
-    item_description,
-    commitment_deposit_amount,
-    total_cost,
-    status,
-    requires_commit,
-    storage_bucket,
-    storage_images,
-    created_at,
-    updated_at
-  FROM commissions
-  WHERE id = $1
-  LIMIT 1
-`;
-
-const COMMISSIONS_FOR_CHECKOUT_BY_IDS_SQL = `
-  SELECT
-    id,
-    item_name,
-    item_description,
-    commitment_deposit_amount,
-    total_cost,
-    status,
-    requires_commit,
-    storage_bucket,
-    storage_images,
-    created_at,
-    updated_at
-  FROM commissions
-  WHERE id = ANY($1::text[])
-`;
+const { COMMISSION_COMMERCE_SELECT, getCommissionPurchase } = require("../lib/commissionCommerce");
 
 let hasCheckedProductSchemaSupport = false;
 let cachedProductSchemaSupport = null;
@@ -65,15 +31,7 @@ function isCommissionProductId(productId) {
 }
 
 function canCheckoutCommissionRow(row) {
-  if (!row || row.requires_commit !== true) {
-    return false;
-  }
-
-  if (!Number.isInteger(Number(row.commitment_deposit_amount))) {
-    return false;
-  }
-
-  return row.status !== "customer_cancelled" && row.status !== "customer_committed";
+  return Boolean(getCommissionPurchase(row));
 }
 
 function toFiniteNumber(value) {
@@ -369,7 +327,7 @@ function mapProductRow(row) {
     status: trimString(row.status) || "active",
     productKind: trimString(row.product_kind) || "repeatable",
     availabilityMode: trimString(row.availability_mode) || "made_to_order",
-    kind: "product",
+    kind: trimString(row.product_kind) || "repeatable",
     price: buildPrice(priceAmount, currency, { compareAtAmount }),
     daysToCreate:
       leadTime && Number.isFinite(leadTime.max)
@@ -393,25 +351,26 @@ function mapProductRow(row) {
 }
 
 function mapCommissionRow(row) {
+  const purchase = getCommissionPurchase(row);
   return {
     id: row.id,
     slug: null,
-    title: `Commission commitment: ${row.item_name}`,
+    title: purchase.title,
     subtitle: null,
     description:
       typeof row.item_description === "string" && row.item_description.trim()
         ? row.item_description.trim()
         : `Commitment payment for commission ${row.id}`,
     status: row.status,
-    productKind: "commission_template",
-    availabilityMode: "made_to_order",
-    price: buildPrice(Number(row.commitment_deposit_amount), env.priceCurrency),
+    productKind: purchase.kind,
+    availabilityMode: purchase.kind === "commission_final" ? "ready_to_ship" : "made_to_order",
+    price: buildPrice(purchase.amount, env.priceCurrency),
     daysToCreate: 0,
     leadTimeDays: {
       min: 0,
       max: 0
     },
-    shipping: null,
+    shipping: purchase.shipping,
     images: [],
     categories: [],
     tags: [],
@@ -419,7 +378,7 @@ function mapCommissionRow(row) {
     options: [],
     variants: [],
     hasVariants: false,
-    kind: "commission_commitment",
+    kind: purchase.kind,
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString()
   };
@@ -428,7 +387,7 @@ function mapCommissionRow(row) {
 async function getProductSchemaSupport(pool) {
   if (hasCheckedProductSchemaSupport && cachedProductSchemaSupport) {
     // Re-check once if optional tables added after startup weren't present on first check.
-    if (cachedProductSchemaSupport.hasImageVariants) {
+    if (cachedProductSchemaSupport.hasImageVariants && cachedProductSchemaSupport.hasImageFraming) {
       return cachedProductSchemaSupport;
     }
   }
@@ -474,10 +433,11 @@ async function getProductSchemaSupport(pool) {
     "attributes",
     "attribute_values",
     "product_attribute_values",
-    "product_image_variants"
+    "product_image_variants",
+    "product_digital_assets"
   ];
 
-  const [columnResult, tableResult, extensionResult] = await Promise.all([
+  const [columnResult, imageColumnResult, tableResult, extensionResult] = await Promise.all([
     pool.query(
       `
         SELECT column_name
@@ -487,6 +447,16 @@ async function getProductSchemaSupport(pool) {
           AND column_name = ANY($1::text[])
       `,
       [productColumns]
+    ),
+    pool.query(
+      `
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'product_images'
+          AND column_name = ANY($1::text[])
+      `,
+      [["source_width", "source_height", "framing", "renditions"]]
     ),
     pool.query(
       `
@@ -505,6 +475,7 @@ async function getProductSchemaSupport(pool) {
   ]);
 
   const columns = new Set(columnResult.rows.map((row) => row.column_name));
+  const imageColumns = new Set(imageColumnResult.rows.map((row) => row.column_name));
   const tables = new Set(tableResult.rows.map((row) => row.table_name));
 
   cachedProductSchemaSupport = {
@@ -534,7 +505,13 @@ async function getProductSchemaSupport(pool) {
       columns.has("shipping_height_in"),
     hasSafety: columns.has("safety_id") && tables.has("safety"),
     hasImages: tables.has("product_images"),
+    hasImageFraming:
+      imageColumns.has("source_width") &&
+      imageColumns.has("source_height") &&
+      imageColumns.has("framing") &&
+      imageColumns.has("renditions"),
     hasImageVariants: tables.has("product_image_variants"),
+    hasDigitalAssets: tables.has("product_digital_assets"),
     hasCategories: tables.has("categories") && tables.has("product_categories"),
     hasTags: tables.has("tags") && tables.has("product_tags"),
     hasOptions: tables.has("product_options") && tables.has("product_option_values"),
@@ -654,6 +631,14 @@ function buildProductByIdSql(support) {
           json_build_object(
             'path', pi.path,
             'alt', pi.alt${
+              support.hasImageFraming
+                ? `,
+            'width', pi.source_width,
+            'height', pi.source_height,
+            'framing', pi.framing,
+            'renditions', pi.renditions`
+                : ""
+            }${
               support.hasImageVariants
                 ? `,
             'variantIds', (
@@ -896,6 +881,7 @@ function buildProductCartStateByIdsSql(support) {
   return `
     SELECT
       p.id,
+      ${support.hasProductKind ? "p.product_kind" : "'repeatable'::text AS product_kind"},
       ${
         support.hasCanonicalLeadTime
           ? "COALESCE(p.lead_time_days_max, p.days_to_create) AS days_to_create"
@@ -912,6 +898,7 @@ function buildProductsForCheckoutByIdsSql(support) {
     SELECT
       p.id,
       p.title,
+      ${support.hasProductKind ? "p.product_kind" : "'repeatable'::text AS product_kind"},
       ${support.hasCurrency ? "p.currency" : "NULL::text AS currency"},
       ${
         support.hasBasePrice
@@ -957,6 +944,16 @@ function buildProductsForCheckoutByIdsSql(support) {
           : "NULL::text AS stripe_thumb_url"
       },
       ${buildHasVariantsSqlExpression(support, "p")} AS has_variants,
+      ${
+        support.hasDigitalAssets
+          ? `EXISTS (
+              SELECT 1
+              FROM product_digital_assets pda
+              WHERE pda.product_id = p.id
+                AND pda.status = 'active'
+            ) AS has_digital_asset`
+          : "FALSE AS has_digital_asset"
+      },
       var.variants
     FROM products p
     LEFT JOIN LATERAL (
@@ -1054,7 +1051,7 @@ async function getProductById(pool, productId) {
     return null;
   }
 
-  const commissionResult = await pool.query(COMMISSION_PRODUCT_BY_ID_SQL, [productId]);
+  const commissionResult = await pool.query(`${COMMISSION_COMMERCE_SELECT} WHERE c.id = $1`, [productId]);
   if (commissionResult.rowCount === 0) {
     return null;
   }
@@ -1139,7 +1136,7 @@ function mapProductCardRow(row) {
     status: trimString(row.status) || "active",
     productKind: trimString(row.product_kind) || "repeatable",
     availabilityMode: trimString(row.availability_mode) || "made_to_order",
-    kind: "product",
+    kind: trimString(row.product_kind) || "repeatable",
     price: buildPrice(priceAmount, currency, {
       compareAtAmount: toFiniteNumber(row.compare_at_price_cents)
     }),
@@ -1241,7 +1238,15 @@ function buildCatalogLateralJoins(support, trgmQueryParam) {
         json_agg(
           json_build_object(
             'path', pi.path,
-            'alt', pi.alt
+            'alt', pi.alt${
+              support.hasImageFraming
+                ? `,
+            'width', pi.source_width,
+            'height', pi.source_height,
+            'framing', pi.framing,
+            'renditions', pi.renditions`
+                : ""
+            }
           )
           ORDER BY pi.sort_order, pi.id
         ),
@@ -1677,7 +1682,15 @@ async function getFeaturedCategories(pool, options = {}) {
             ? `
         SELECT json_build_object(
           'path', pi.path,
-          'alt', pi.alt
+          'alt', pi.alt${
+            support.hasImageFraming
+              ? `,
+          'width', pi.source_width,
+          'height', pi.source_height,
+          'framing', pi.framing,
+          'renditions', pi.renditions`
+              : ""
+          }
         ) AS image
         FROM product_images pi
         WHERE pi.product_id = product_pick.id
@@ -1736,7 +1749,8 @@ async function getProductCartStateByIds(pool, productIds) {
       row.id,
       {
         daysToCreate: Number(row.days_to_create),
-        hasVariants: row.has_variants === true
+        hasVariants: row.has_variants === true,
+        kind: trimString(row.product_kind) || "repeatable"
       }
     ])
   );
@@ -1746,12 +1760,13 @@ async function getProductCartStateByIds(pool, productIds) {
     return productStateById;
   }
 
-  const commissionResult = await pool.query(COMMISSIONS_FOR_CHECKOUT_BY_IDS_SQL, [commissionIds]);
+  const commissionResult = await pool.query(`${COMMISSION_COMMERCE_SELECT} WHERE c.id = ANY($1::text[])`, [commissionIds]);
   for (const row of commissionResult.rows) {
     if (canCheckoutCommissionRow(row)) {
       productStateById.set(row.id, {
         daysToCreate: 0,
-        hasVariants: false
+        hasVariants: false,
+        kind: getCommissionPurchase(row).kind
       });
     }
   }
@@ -1764,53 +1779,73 @@ async function getProductsForCheckoutByIds(pool, productIds) {
     return new Map();
   }
 
-  const support = await getProductSchemaSupport(pool);
-  const result = await pool.query(buildProductsForCheckoutByIdsSql(support), [productIds]);
-  const normalizedRows = await Promise.all(
-    result.rows.map(async (row) => ({
-      id: row.id,
-      title: row.title,
-      sellPriceCents: Number(row.sell_price_cents),
-      daysToCreate: Number(row.days_to_create),
-      currency: trimString(row.currency) || env.priceCurrency,
-      stripeThumbUrl: await resolveStripeThumbnailUrl(row.id, row.stripe_thumb_url),
-      shipping: mapShippingProfile(row),
-      hasVariants: row.has_variants === true,
-      variants: readJsonArray(row.variants)
-        .map((variant) =>
-          mapVariant(
-            variant,
-            Number(row.sell_price_cents),
-            trimString(row.currency) || env.priceCurrency
-          )
-        )
-        .filter(Boolean),
-      kind: "product"
-    }))
-  );
-  const productsById = new Map(normalizedRows.map((row) => [row.id, row]));
-
   const commissionIds = productIds.filter((productId) => isCommissionProductId(productId));
+  const catalogIds = productIds.filter((productId) => !isCommissionProductId(productId));
+  const productsById = new Map();
+
+  // Commission products are synthetic checkout records and do not exist in
+  // the catalog. Avoid probing the catalog schema for commission-only carts;
+  // that probe is unnecessary and can leave a shipping request waiting on a
+  // database connection before the commission lookup even begins.
+  if (catalogIds.length > 0) {
+    const support = await getProductSchemaSupport(pool);
+    const result = await pool.query(buildProductsForCheckoutByIdsSql(support), [catalogIds]);
+    const normalizedRows = await Promise.all(
+      result.rows.map(async (row) => {
+        const productKind = trimString(row.product_kind) || "repeatable";
+        const stripeThumbUrl = await resolveStripeThumbnailUrl(row.id, row.stripe_thumb_url);
+
+        return {
+          id: row.id,
+          title: row.title,
+          sellPriceCents: Number(row.sell_price_cents),
+          daysToCreate: Number(row.days_to_create),
+          currency: trimString(row.currency) || env.priceCurrency,
+          stripeThumbUrl,
+          shipping: mapShippingProfile(row),
+          hasVariants: row.has_variants === true,
+          hasDigitalAsset: row.has_digital_asset === true,
+          variants: readJsonArray(row.variants)
+            .map((variant) =>
+              mapVariant(
+                variant,
+                Number(row.sell_price_cents),
+                trimString(row.currency) || env.priceCurrency
+              )
+            )
+            .filter(Boolean),
+          kind: productKind,
+          productKind
+        };
+      })
+    );
+    for (const row of normalizedRows) {
+      productsById.set(row.id, row);
+    }
+  }
+
   if (commissionIds.length === 0) {
     return productsById;
   }
 
-  const commissionResult = await pool.query(COMMISSIONS_FOR_CHECKOUT_BY_IDS_SQL, [commissionIds]);
+  const commissionResult = await pool.query(`${COMMISSION_COMMERCE_SELECT} WHERE c.id = ANY($1::text[])`, [commissionIds]);
   for (const row of commissionResult.rows) {
     if (!canCheckoutCommissionRow(row)) {
       continue;
     }
 
+    const purchase = getCommissionPurchase(row);
     productsById.set(row.id, {
       id: row.id,
-      title: `Commission commitment: ${row.item_name}`,
-      sellPriceCents: Number(row.commitment_deposit_amount),
+      title: purchase.title,
+      sellPriceCents: purchase.amount,
       daysToCreate: 0,
       currency: env.priceCurrency,
       stripeThumbUrl: null,
       hasVariants: false,
       variants: [],
-      kind: "commission_commitment"
+      shipping: purchase.shipping,
+      kind: purchase.kind
     });
   }
 
