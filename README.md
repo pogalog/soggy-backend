@@ -422,7 +422,39 @@ In this repo's checked-in [`deploy-setup.sh`](/home/anaiah/soggy-cloud-functions
 
 The deployed Cloud Function service account must have `roles/secretmanager.secretAccessor` on those secrets.
 
-Stripe webhooks require the HTTP function to accept unauthenticated requests. In this repo's checked-in [`deploy-setup.sh`](/home/anaiah/soggy-cloud-functions/deploy-setup.sh), `ALLOW_UNAUTHENTICATED=true` is enabled so Stripe can reach `/api/stripe/webhook`.
+### Access control: a private API and a public webhook
+
+The same source deploys as **two functions**:
+
+| Command | Function | Entry point | Access |
+|---|---|---|---|
+| `./deploy.sh` | `products` | `api` | **Private.** Cloud Run IAM allows only `API_INVOKER_MEMBERS` (the storefront's service account, `soggy-stitches@appspot.gserviceaccount.com`) |
+| `./deploy.sh webhook` | `stripe-webhook` | `stripeWebhook` | Public, but serves **only** `/api/stripe/webhook` (every other path returns 404) and verifies Stripe's signature |
+
+The storefront already calls the API with Google ID tokens (`soggy-stitches/lib/internalFetch.ts`),
+so making `products` private needs no storefront change. Cloud Run rejects requests without a valid
+token before they reach this code.
+
+The script enforces this. Public access follows from the entry point: `ALLOW_UNAUTHENTICATED=true`
+with any entry point other than `stripeWebhook` is refused. A private deploy also removes any existing
+`allUsers` and `allAuthenticatedUsers` invoker bindings, because `--no-allow-unauthenticated` alone
+doesn't remove them. The webhook function's instance count is capped at `WEBHOOK_MAX_INSTANCE_COUNT`
+(default 2) to protect the database's connection slots. Use `DRY_RUN=true` to print the gcloud
+commands without running them.
+
+**One-time rollout** (in this order, so webhooks never stop being delivered):
+
+1. `./deploy.sh webhook`, then note the function URL.
+2. In the Stripe Dashboard → Developers → Webhooks, **edit the existing endpoint's URL** to
+   `<stripe-webhook URL>/api/stripe/webhook`. Editing keeps the signing secret
+   (`STRIPE_CHECKOUT_WEBHOOK_SECRET`) unchanged. Resend a recent `checkout.session.completed` event
+   and check that it returns 200. Reprocessing is idempotent.
+3. `./deploy.sh` (private API).
+4. Verify: `curl -i <products URL>/markets` returns **403**, and the storefront still loads
+   products, carts and checkout.
+
+Rollback for step 3, if the storefront breaks:
+`gcloud run services add-iam-policy-binding products --region=us-east1 --member=allUsers --role=roles/run.invoker`.
 
 For the default IAM deployment, the script reads `INSTANCE_CONNECTION_NAME` at deploy time and passes it as ordinary runtime configuration for the Cloud SQL connector. If you use direct TCP instead, set `DB_HOST` (and optional `DB_PORT`).
 
