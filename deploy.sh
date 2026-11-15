@@ -4,6 +4,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_SCRIPT="${SCRIPT_DIR}/deploy-setup.sh"
 
+# Deploy target:
+#   ./deploy.sh            -> private `api` function (Cloud Run IAM: API_INVOKER_MEMBERS only)
+#   ./deploy.sh webhook    -> public `stripeWebhook` function (Stripe signature-verified, webhook path only)
+# DRY_RUN=true prints the gcloud commands instead of running them.
+DEPLOY_TARGET="${1:-api}"
+case "${DEPLOY_TARGET}" in
+  api)
+    ;;
+  webhook)
+    export FUNCTION_NAME="${WEBHOOK_FUNCTION_NAME:-stripe-webhook}"
+    export ENTRY_POINT="stripeWebhook"
+    ;;
+  *)
+    echo "Usage: $0 [api|webhook]" >&2
+    exit 2
+    ;;
+esac
+
 if [[ -f "${SETUP_SCRIPT}" ]]; then
   # Load project-specific deploy defaults into the current shell before computing args.
   # shellcheck disable=SC1090
@@ -15,8 +33,30 @@ FUNCTION_NAME="${FUNCTION_NAME:-products}"
 ENTRY_POINT="${ENTRY_POINT:-api}"
 REGION="${REGION:-us-east1}"
 RUNTIME="${RUNTIME:-nodejs22}"
-ALLOW_UNAUTHENTICATED="${ALLOW_UNAUTHENTICATED:-false}"
+DRY_RUN="${DRY_RUN:-false}"
 MAX_INSTANCE_COUNT="${MAX_INSTANCE_COUNT:-8}"
+
+# Public access is decided by the entry point, never by a free-floating flag: only the
+# webhook-only entry point may be public. Every other entry point exposes the whole API.
+if [[ "${ENTRY_POINT}" == "stripeWebhook" ]]; then
+  ALLOW_UNAUTHENTICATED="true"
+  # Each instance holds up to DB_POOL_MAX connections to a db-f1-micro; webhook traffic is
+  # light, so keep it from competing with the API for connection slots.
+  MAX_INSTANCE_COUNT="${WEBHOOK_MAX_INSTANCE_COUNT:-2}"
+else
+  if [[ "${ALLOW_UNAUTHENTICATED:-false}" == "true" ]]; then
+    echo "Refusing to deploy entry point '${ENTRY_POINT}' with unauthenticated access." >&2
+    echo "Only the Stripe webhook is public: use './deploy.sh webhook'." >&2
+    exit 1
+  fi
+  ALLOW_UNAUTHENTICATED="false"
+  # Who may invoke the private API (space-separated IAM members). The storefront's Cloud Run
+  # service account calls it with Google ID tokens (soggy-stitches/lib/internalFetch.ts).
+  if [[ -z "${API_INVOKER_MEMBERS:-}" ]]; then
+    echo "API_INVOKER_MEMBERS is empty; the storefront would lose access. Set it in deploy-setup.sh." >&2
+    exit 1
+  fi
+fi
 FUNCTION_MEMORY="${FUNCTION_MEMORY:-512Mi}"
 SECRET_VERSION="${SECRET_VERSION:-latest}"
 DB_USER_SECRET="${DB_USER_SECRET:-DB_USER}"
@@ -216,4 +256,46 @@ if [[ ${#ENV_VARS[@]} -gt 0 ]]; then
   DEPLOY_ARGS+=(--update-env-vars="$(format_gcloud_dict_arg "${ENV_VARS[@]}")")
 fi
 
-"${DEPLOY_ARGS[@]}"
+run() {
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    printf '[dry-run]'
+    printf ' %q' "$@"
+    printf '\n'
+  else
+    "$@"
+  fi
+}
+
+run "${DEPLOY_ARGS[@]}"
+
+# A gen2 function is a Cloud Run service with the same name. `--no-allow-unauthenticated`
+# only declines to ADD a public binding; it does not remove an existing one. So for the
+# private API, explicitly remove public members and (re)grant the intended invokers.
+if [[ "${ALLOW_UNAUTHENTICATED}" != "true" ]]; then
+  RUN_SERVICE_ARGS=(--project="${PROJECT_ID}" --region="${REGION}")
+
+  for member in ${API_INVOKER_MEMBERS}; do
+    run gcloud run services add-iam-policy-binding "${FUNCTION_NAME}" "${RUN_SERVICE_ARGS[@]}" \
+      --member="${member}" --role="roles/run.invoker" --quiet --format=none
+  done
+
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    CURRENT_INVOKERS="allUsers allAuthenticatedUsers"
+  else
+    # Fails the script (set -e) if the policy can't be read, rather than assuming it's private.
+    CURRENT_INVOKERS="$(gcloud run services get-iam-policy "${FUNCTION_NAME}" "${RUN_SERVICE_ARGS[@]}" \
+      --flatten="bindings[].members" \
+      --filter="bindings.role=roles/run.invoker" \
+      --format="value(bindings.members)")"
+  fi
+
+  for public_member in allUsers allAuthenticatedUsers; do
+    if grep -qxw "${public_member}" <<<"$(tr ' ' '\n' <<<"${CURRENT_INVOKERS}")"; then
+      run gcloud run services remove-iam-policy-binding "${FUNCTION_NAME}" "${RUN_SERVICE_ARGS[@]}" \
+        --member="${public_member}" --role="roles/run.invoker" --quiet --format=none
+      echo "Removed public invoker '${public_member}' from ${FUNCTION_NAME}."
+    fi
+  done
+
+  echo "${FUNCTION_NAME} is private. Invokers: ${API_INVOKER_MEMBERS}"
+fi

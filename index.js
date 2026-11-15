@@ -20,7 +20,7 @@ const {
 } = require("./src/handlers/digitalDownloadHandler");
 const { createMarketHandler } = require("./src/handlers/marketHandler");
 const { createSiteContentHandler } = require("./src/handlers/siteContentHandler");
-const { createApiHandler } = require("./src/handlers/apiHandler");
+const { createApiHandler, createStripeWebhookEntry } = require("./src/handlers/apiHandler");
 const { getPool } = require("./src/db/pool");
 const { createCommissionImageHandler } = require("./src/handlers/commissionImageHandler");
 
@@ -60,9 +60,14 @@ const api = createApiHandler({
   siteContentHandler
 });
 
+// Public entry point (deployed separately, `./deploy.sh webhook`): serves only the Stripe
+// webhook path. Everything else lives behind the private `api` function.
+const stripeWebhook = createStripeWebhookEntry({ stripeWebhookHandler });
+
 module.exports = {
   // Backward-compatible aliases: old targets now route both products and carts.
   getProduct: api,
   cartService: api,
-  api
+  api,
+  stripeWebhook
 };

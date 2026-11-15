@@ -300,6 +300,25 @@ function createApiHandler({
   };
 }
 
+/**
+ * Entry point for the separately deployed, public `stripeWebhook` function.
+ *
+ * The main `api` function is private (Cloud Run IAM: only the storefront's service
+ * account may invoke it). Stripe cannot present a Google identity token, so the webhook
+ * is deployed as its own public function from this same codebase. It serves ONLY the
+ * webhook path and is authenticated by Stripe's signature check inside the handler.
+ */
+function createStripeWebhookEntry({ stripeWebhookHandler }) {
+  return async function stripeWebhookEntry(req, res) {
+    if (!isStripeWebhookRequest(req)) {
+      return res.status(404).json({ error: "Not found" });
+    }
+    return stripeWebhookHandler(req, res);
+  };
+}
+
 module.exports = {
-  createApiHandler
+  createApiHandler,
+  createStripeWebhookEntry,
+  isStripeWebhookRequest
 };

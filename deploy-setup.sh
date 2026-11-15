@@ -16,7 +16,10 @@ export SHIP_FROM_ADDRESS_SECRET="SHIP_FROM_ADDRESS"
 export FUNCTION_NAME="${FUNCTION_NAME:-products}"
 export REGION="us-east1"
 export RUNTIME="nodejs22"
-export ALLOW_UNAUTHENTICATED="true"
+# The `api` function is private; only these IAM members may invoke it (space-separated).
+# The storefront (Cloud Run service `soggy-stitches`) runs as this service account and sends
+# Google ID tokens. The public Stripe webhook is a separate function: `./deploy.sh webhook`.
+export API_INVOKER_MEMBERS="serviceAccount:soggy-stitches@appspot.gserviceaccount.com"
 # Cloud SQL is a db-f1-micro instance. Keep per-instance pools and autoscaling
 # bounded so a traffic burst cannot exhaust its connection slots.
 export DB_POOL_MAX="2"
